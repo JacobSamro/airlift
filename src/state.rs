@@ -1,0 +1,112 @@
+//! Shared application state passed to every handler.
+
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
+
+use crate::config::Config;
+use crate::db::Db;
+use crate::storage::Storage;
+
+/// Cheaply-cloneable handle to shared server state.
+#[derive(Clone)]
+pub struct AppState(Arc<Inner>);
+
+pub struct Inner {
+    pub config: Config,
+    pub db: Db,
+    /// Effective public base URL (`scheme://host`, no trailing slash). Explicit
+    /// `server.public_url` config wins; otherwise it's derived from the primary
+    /// custom domain and refreshed whenever the domain set changes. Empty during
+    /// the IP-only bootstrap phase, in which case handlers fall back to the
+    /// request's `Host` header.
+    pub public_url: ArcSwap<String>,
+    /// Hot-swappable storage client (rebuilt when admins change settings).
+    pub storage: ArcSwap<Storage>,
+    /// Secret used to sign session cookies.
+    pub secret_key: Vec<u8>,
+    /// Notified when the custom-domain set changes, so the TLS task reloads.
+    pub domains_changed: tokio::sync::Notify,
+}
+
+impl AppState {
+    pub fn new(config: Config, db: Db, storage: Storage, secret_key: Vec<u8>) -> Self {
+        let public_url = config.server.public_url.trim_end_matches('/').to_string();
+        AppState(Arc::new(Inner {
+            config,
+            db,
+            public_url: ArcSwap::from_pointee(public_url),
+            storage: ArcSwap::from_pointee(storage),
+            secret_key,
+            domains_changed: tokio::sync::Notify::new(),
+        }))
+    }
+
+    /// Wake the TLS task to reload its certificate domain set.
+    pub fn notify_domains_changed(&self) {
+        self.0.domains_changed.notify_one();
+    }
+
+    /// Await the next domain-set change.
+    pub async fn domains_changed(&self) {
+        self.0.domains_changed.notified().await;
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.0.config
+    }
+
+    /// Current effective public base URL (`scheme://host`, no trailing slash).
+    /// Empty during the IP-only bootstrap phase.
+    pub fn public_url(&self) -> Arc<String> {
+        self.0.public_url.load_full()
+    }
+
+    /// Recompute the effective public URL and store it. Explicit config always
+    /// wins; otherwise derive `https://<primary-domain>`, or empty if no domain
+    /// is configured yet. Called at startup and whenever the domain set changes,
+    /// so adding a domain in the dashboard updates manifest asset URLs without
+    /// a restart.
+    pub async fn refresh_public_url(&self) {
+        let configured = self.0.config.server.public_url.trim_end_matches('/');
+        let effective = if !configured.is_empty() {
+            configured.to_string()
+        } else {
+            match crate::db::domains::primary(self.db()).await {
+                Ok(Some(domain)) => format!("https://{domain}"),
+                _ => String::new(),
+            }
+        };
+        self.0.public_url.store(Arc::new(effective));
+    }
+
+    pub fn db(&self) -> &Db {
+        &self.0.db
+    }
+
+    /// Current storage client (cheap Arc load; safe to hold across awaits).
+    #[allow(dead_code)]
+    pub fn storage(&self) -> Arc<Storage> {
+        self.0.storage.load_full()
+    }
+
+    /// Replace the storage client after a settings change.
+    pub fn set_storage(&self, storage: Storage) {
+        self.0.storage.store(Arc::new(storage));
+    }
+
+    #[allow(dead_code)]
+    pub fn secret_key(&self) -> &[u8] {
+        &self.0.secret_key
+    }
+
+    /// Whether session cookies should carry the `Secure` attribute — true when
+    /// the *effective* public URL is HTTPS (explicit config or a primary custom
+    /// domain), so cookies set on a live HTTPS deployment are marked `Secure`
+    /// even when the URL was derived from a domain rather than pinned in config.
+    /// Stays false during the IP-only bootstrap phase so plain-HTTP dashboard
+    /// login keeps working until a domain is in place.
+    pub fn cookie_secure(&self) -> bool {
+        self.public_url().starts_with("https://")
+    }
+}

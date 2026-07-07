@@ -1,0 +1,23 @@
+/target
+**/*.rs.bk
+*.db
+*.db-shm
+*.db-wal
+.env
+config.toml
+config.local.toml
+
+# web (Nuxt)
+web/node_modules
+web/.output
+web/.nuxt
+web/dist
+
+# playwright dashboard e2e
+web/test-results
+web/playwright-report
+web/tests/e2e/.auth
+web/tests/e2e/.tmp
+
+.DS_Store
+CLAUDE.md
