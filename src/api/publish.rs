@@ -225,6 +225,7 @@ pub async fn publish(
 
     let released = advance_channels(&state, &app, &branch, &group).await?;
 
+    metrics::counter!("airlift_publish_total", "app" => app.slug.clone()).increment(1);
     db::audit::record(
         state.db(),
         Some(&caller.user.id),

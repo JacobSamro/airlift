@@ -442,6 +442,95 @@ async fn asset_endpoint_is_app_confined() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn client_monitoring_and_metrics() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "m1")).await;
+    assert_eq!(status, 201);
+
+    // Two devices check in; one is already current.
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
+    let manifest = verified_part(&ctx, resp, "manifest").await;
+    let update_id = manifest["id"].as_str().unwrap().to_string();
+    let _ = ctx
+        .http
+        .get(format!("{}/u/{}/manifest", ctx.base, ctx.app_id))
+        .header("expo-platform", "ios")
+        .header("expo-runtime-version", "1.0.0")
+        .header("expo-channel-name", "production")
+        .header("expo-protocol-version", "1")
+        .header("EAS-Client-ID", "device-2")
+        .header("expo-current-update-id", &update_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Wait for the 1s flush loop to persist the check-ins.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let stats = loop {
+        let stats: Value = ctx
+            .http
+            .get(format!("{}/api/v1/orgs/acme/apps/mobile/stats", ctx.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if stats["total_devices"].as_i64().unwrap_or(0) >= 2 {
+            break stats;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "check-ins never flushed: {stats}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    };
+    // device-2 is attributed to the update it runs.
+    let adoption = stats["adoption"].as_array().unwrap();
+    assert!(adoption.iter().any(
+        |a| a["current_update_id"].as_str() == Some(update_id.as_str())
+            && a["devices"].as_i64() == Some(1)
+    ));
+    assert!(!stats["series"].as_array().unwrap().is_empty());
+
+    let clients: Value = ctx
+        .http
+        .get(format!("{}/api/v1/orgs/acme/apps/mobile/clients", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids: Vec<&str> = clients["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["client_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"test-device-1") && ids.contains(&"device-2"));
+
+    // Prometheus endpoint exposes the counters.
+    let metrics = ctx
+        .http
+        .get(format!("{}/metrics", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        metrics.contains("airlift_manifest_requests_total"),
+        "{metrics}"
+    );
+    assert!(metrics.contains("airlift_publish_total"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn publish_requires_a_capable_token() {
     let stub = spawn_s3_stub().await;
     let server = Airlift::spawn(&stub).await;

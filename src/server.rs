@@ -15,6 +15,18 @@ use tower_http::{
 
 use crate::state::AppState;
 
+/// The global Prometheus recorder, installed once on first router build.
+static PROMETHEUS: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandle> =
+    std::sync::OnceLock::new();
+
+fn prometheus_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+    PROMETHEUS.get_or_init(|| {
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .expect("install prometheus recorder")
+    })
+}
+
 /// Build the full application router with the shared middleware stack.
 pub fn router(state: AppState) -> Router {
     let hsts = state.config().tls.enabled;
@@ -40,8 +52,12 @@ pub fn router(state: AppState) -> Router {
                 .expect("default CSP is valid header value"),
         ));
 
+    // Install the recorder before any request can emit a metric.
+    let _ = prometheus_handle();
+
     let mut router = Router::new()
         .route("/healthz", get(healthz))
+        .route("/metrics", get(|| async { prometheus_handle().render() }))
         .merge(crate::api::routes())
         .merge(crate::protocol::routes())
         .fallback(crate::web::handler)

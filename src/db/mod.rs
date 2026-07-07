@@ -2,6 +2,7 @@
 
 pub mod apps;
 pub mod audit;
+pub mod clients;
 pub mod domains;
 pub mod orgs;
 pub mod settings;

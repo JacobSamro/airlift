@@ -78,6 +78,30 @@ async fn manifest(
     let current_update_id =
         param(&headers, &query, "expo-current-update-id").map(|s| s.to_ascii_lowercase());
     let expect_signature = param(&headers, &query, "expo-expect-signature").is_some();
+    let client_id = param(&headers, &query, "eas-client-id");
+    let embedded_update_id = param(&headers, &query, "expo-embedded-update-id");
+
+    // Off-hot-path accounting: bump the Prometheus counter and record the
+    // device check-in (flushed to SQLite by the background loop).
+    let track = |result: &'static str, served_update_id: &str| {
+        metrics::counter!(
+            "airlift_manifest_requests_total",
+            "app" => app.slug.clone(),
+            "platform" => platform.clone(),
+            "result" => result,
+        )
+        .increment(1);
+        state.usage().record_checkin(
+            &app.id,
+            client_id.as_deref(),
+            &platform,
+            &runtime_version,
+            &channel_name,
+            embedded_update_id.as_deref(),
+            current_update_id.as_deref(),
+            served_update_id,
+        );
+    };
 
     let channel = db::updates::find_channel(state.db(), &app.id, &channel_name)
         .await?
@@ -89,12 +113,14 @@ async fn manifest(
     };
 
     let Some(group) = group else {
+        track("no_update", "");
         return no_update_response(&state, &app, protocol, expect_signature);
     };
 
     // A rollback group emits the protocol-1 directive; protocol-0 clients
     // can't process directives, so they get "no update" semantics.
     if group.group_type == "rollback_to_embedded" {
+        track("rollback", "");
         if protocol == 1 {
             let directive = json!({
                 "type": "rollBackToEmbedded",
@@ -114,13 +140,17 @@ async fn manifest(
 
     let updates = db::updates::updates_in_group(state.db(), &group.id).await?;
     let Some(update) = updates.into_iter().find(|u| u.platform == platform) else {
+        track("no_update", "");
         return no_update_response(&state, &app, protocol, expect_signature);
     };
 
-    // The client is already running exactly this update.
+    // The client is already running exactly this update. Attribute the
+    // check-in to that update so adoption stats count settled devices.
     if current_update_id.as_deref() == Some(&update.id.to_ascii_lowercase()) {
+        track("up_to_date", &update.id);
         return no_update_response(&state, &app, protocol, expect_signature);
     }
+    track("manifest", &update.id);
 
     // ── build the manifest ──
     let base = crate::auth::base_url(&state, &headers);
@@ -318,6 +348,7 @@ async fn asset(
     }
     let key = crate::storage::Storage::asset_key(&app.org_id, &sha256);
     let url = state.storage().presign_get(&key).await?;
+    metrics::counter!("airlift_asset_redirects_total", "app" => app.slug.clone()).increment(1);
     Ok(Redirect::temporary(&url).into_response())
 }
 

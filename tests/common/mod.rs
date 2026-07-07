@@ -207,6 +207,8 @@ impl Airlift {
             .env("AIRLIFT_SERVER__HTTP_ADDR", format!("127.0.0.1:{port}"))
             // TLS defaults on; the e2e drives plain HTTP on a loopback port.
             .env("AIRLIFT_TLS__ENABLED", "false")
+            // Flush check-in counters every second so tests can observe them.
+            .env("AIRLIFT_ANALYTICS__ROLLUP_SECS", "1")
             .env("AIRLIFT_STORAGE__ENDPOINT", format!("http://{stub}"))
             .env("AIRLIFT_STORAGE__BUCKET", "test")
             .env("AIRLIFT_STORAGE__REGION", "us-east-1")

@@ -288,6 +288,37 @@ pub(crate) async fn group_json(
     }))
 }
 
+// ───────────────────────── monitoring ─────────────────────────
+
+/// Adoption + activity stats for an app: devices per update (14-day window)
+/// and the daily manifest-request series (30 days).
+pub async fn app_stats(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug)): Path<(String, String)>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let adoption = db::clients::adoption(state.db(), &app.id).await?;
+    let series = db::clients::checkin_series(state.db(), &app.id, 30).await?;
+    let total_devices: i64 = adoption.iter().map(|a| a.devices).sum();
+    Ok(json_ok(json!({
+        "adoption": adoption,
+        "series": series,
+        "total_devices": total_devices,
+    })))
+}
+
+/// Recently-seen devices for an app.
+pub async fn app_clients(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug)): Path<(String, String)>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let clients = db::clients::list_clients(state.db(), &app.id, 200).await?;
+    Ok(json_ok(json!({ "clients": clients })))
+}
+
 // ───────────────────────── channels ─────────────────────────
 
 #[derive(Deserialize)]

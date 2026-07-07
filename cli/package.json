@@ -1,0 +1,29 @@
+{
+  "name": "airlift-cli",
+  "version": "0.1.0",
+  "description": "Publish CLI for airlift, a self-hosted Expo OTA update server",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "airlift": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

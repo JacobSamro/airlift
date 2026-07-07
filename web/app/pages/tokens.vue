@@ -37,6 +37,28 @@ watch([scopeType, scopeOrg], () => {
   }
 });
 
+// Apps for the selected org, so the app scope is a picker instead of free text.
+const orgApps = ref<App[]>([]);
+const orgAppsLoading = ref(false);
+watch(
+  [scopeType, scopeOrg],
+  async () => {
+    if (scopeType.value !== "app" || !scopeOrg.value) return;
+    orgAppsLoading.value = true;
+    scopeApp.value = "";
+    try {
+      orgApps.value = (
+        await api.get<{ apps: App[] }>(`/api/v1/orgs/${scopeOrg.value}/apps`)
+      ).apps;
+    } catch {
+      orgApps.value = [];
+    } finally {
+      orgAppsLoading.value = false;
+    }
+  },
+  { immediate: false },
+);
+
 async function load() {
   loading.value = true;
   try {

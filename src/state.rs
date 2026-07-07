@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use crate::analytics::UsageCollector;
 use crate::config::Config;
 use crate::db::Db;
 use crate::storage::Storage;
@@ -27,11 +28,14 @@ pub struct Inner {
     pub secret_key: Vec<u8>,
     /// Notified when the custom-domain set changes, so the TLS task reloads.
     pub domains_changed: tokio::sync::Notify,
+    /// In-memory client check-ins, flushed to SQLite by the background task.
+    pub usage: UsageCollector,
 }
 
 impl AppState {
     pub fn new(config: Config, db: Db, storage: Storage, secret_key: Vec<u8>) -> Self {
         let public_url = config.server.public_url.trim_end_matches('/').to_string();
+        let usage = UsageCollector::new(config.analytics.enabled);
         AppState(Arc::new(Inner {
             config,
             db,
@@ -39,7 +43,13 @@ impl AppState {
             storage: ArcSwap::from_pointee(storage),
             secret_key,
             domains_changed: tokio::sync::Notify::new(),
+            usage,
         }))
+    }
+
+    /// Client check-in collector (in-memory; flushed by the background task).
+    pub fn usage(&self) -> &UsageCollector {
+        &self.0.usage
     }
 
     /// Wake the TLS task to reload its certificate domain set.

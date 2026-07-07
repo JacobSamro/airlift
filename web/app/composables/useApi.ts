@@ -39,6 +39,43 @@ export interface TeamPerm {
   app: string;
   permission: string;
 }
+export interface App {
+  id: string;
+  org_id: string;
+  slug: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface Branch {
+  id: string;
+  name: string;
+  created_at: string;
+}
+export interface ChannelRelease {
+  runtime_version: string;
+  group_id: string;
+  released_at: string;
+}
+export interface Channel {
+  id: string;
+  name: string;
+  branch: string | null;
+  branch_id: string | null;
+  auto_release: boolean;
+  releases: ChannelRelease[];
+}
+export interface UpdateGroup {
+  id: string;
+  branch: string;
+  runtime_version: string;
+  message: string | null;
+  git_branch: string | null;
+  git_commit: string | null;
+  group_type: "normal" | "rollback_to_embedded";
+  platforms: string[];
+  created_at: string;
+}
 export interface Token {
   id: string;
   name: string;
@@ -62,6 +99,7 @@ export function useApi() {
     get: <T>(p: string) => call<T>("GET", p),
     post: <T>(p: string, b?: unknown) => call<T>("POST", p, b),
     put: <T>(p: string, b?: unknown) => call<T>("PUT", p, b),
+    patch: <T>(p: string, b?: unknown) => call<T>("PATCH", p, b),
     del: <T>(p: string) => call<T>("DELETE", p),
   };
 }

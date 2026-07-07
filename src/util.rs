@@ -19,7 +19,6 @@ pub fn rfc3339_in(secs: i64) -> String {
 
 /// UTC calendar day (`YYYY-MM-DD`) `days` before today — the lower bound for
 /// analytics range queries.
-#[allow(dead_code)]
 pub fn utc_day_offset(days: i64) -> String {
     let d = (OffsetDateTime::now_utc() - time::Duration::days(days)).date();
     format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())

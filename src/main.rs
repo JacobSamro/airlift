@@ -1,5 +1,6 @@
 //! airlift — a self-hosted Expo OTA update server, S3-backed (Tigris).
 
+mod analytics;
 mod api;
 mod auth;
 mod config;
@@ -132,12 +133,18 @@ async fn main() -> anyhow::Result<()> {
 
             let tls_enabled = config.tls.enabled;
             let http_addr = config.server.http_addr.clone();
+            let analytics_enabled = config.analytics.enabled;
+            let rollup_secs = config.analytics.rollup_secs;
             let state = state::AppState::new(config, pool, storage, secret_key);
             // Derive the effective public URL from config or the primary domain
             // before serving, so manifest asset URLs are correct on the first
             // request (no restart needed after a domain is later added).
             state.refresh_public_url().await;
             let app = server::router(state.clone());
+
+            if analytics_enabled {
+                tokio::spawn(analytics::flush_loop(state.clone(), rollup_secs));
+            }
 
             if tls_enabled {
                 tls::serve(state, app).await?;
