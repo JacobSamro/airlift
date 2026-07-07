@@ -332,6 +332,7 @@ fn hex_to_b64url(hex_digest: &str) -> String {
 async fn asset(
     State(state): State<AppState>,
     Path((app_id, sha256)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let sha256 = sha256.to_ascii_lowercase();
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -345,6 +346,14 @@ async fn asset(
     // not become a cross-app oracle.
     if !db::updates::asset_in_app(state.db(), &app.id, &sha256).await? {
         return Err(Error::NotFound);
+    }
+    // SDK 55+ clients may ask for a bsdiff patch of the launch bundle
+    // (A-IM: bsdiff). When one is ready this answers 226 with the patch;
+    // otherwise (or on any mismatch) we fall through to the full bundle —
+    // the client verifies hashes and falls back on its own, so the full
+    // download is always the safe default.
+    if let Some(resp) = crate::patches::maybe_serve_patch(&state, &app, &sha256, &headers).await? {
+        return Ok(resp);
     }
     let key = crate::storage::Storage::asset_key(&app.org_id, &sha256);
     let url = state.storage().presign_get(&key).await?;

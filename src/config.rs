@@ -32,6 +32,34 @@ pub struct Config {
     /// Client-monitoring / usage analytics settings.
     #[serde(default)]
     pub analytics: AnalyticsConfig,
+    /// bsdiff incremental-patch settings.
+    #[serde(default)]
+    pub patches: PatchesConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchesConfig {
+    /// Generate and serve bsdiff patches between launch bundles (SDK 55+
+    /// clients send `A-IM: bsdiff`). Generation is lazy: the first patch
+    /// request enqueues a job and gets the full bundle; later requests get
+    /// the (much smaller) patch.
+    pub enabled: bool,
+    /// How often (seconds) the background worker polls for queued patches.
+    pub poll_secs: u64,
+    /// A patch is only kept when smaller than this fraction of the full
+    /// bundle; otherwise the pair is marked not-beneficial and clients keep
+    /// getting full downloads.
+    pub max_size_ratio: f64,
+}
+
+impl Default for PatchesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_secs: 5,
+            max_size_ratio: 0.75,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +243,7 @@ impl Default for Config {
             tls: TlsConfig::default(),
             gc: GcConfig::default(),
             analytics: AnalyticsConfig::default(),
+            patches: PatchesConfig::default(),
         }
     }
 }

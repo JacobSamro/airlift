@@ -61,6 +61,11 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto
 # Reading uploaded `expo export` archives
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Incremental launch-bundle patches (SDK 55+). qbsdiff emits the classic
+# bzip2 BSDIFF40 container — the only format the expo-updates vendored
+# bspatch.c accepts (Endsley BSDIFF43 does NOT apply).
+qbsdiff = "1"
+
 # Serialization + config
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -121,6 +126,7 @@ tempfile = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 x509-parser = "0.16"
+qbsdiff = "1"
 
 [profile.release]
 opt-level = 3

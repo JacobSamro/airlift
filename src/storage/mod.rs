@@ -139,6 +139,25 @@ impl Storage {
         Ok(req.uri().to_string())
     }
 
+    /// Fetch a whole object into memory (used by the patch worker; bundles
+    /// are MB-scale).
+    pub async fn get(&self, key: &str) -> Result<Vec<u8>> {
+        let out = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| map_s3("get", e))?;
+        let data = out
+            .body
+            .collect()
+            .await
+            .map_err(|e| map_s3("get body", e))?;
+        Ok(data.into_bytes().to_vec())
+    }
+
     pub async fn delete(&self, key: &str) -> Result<()> {
         self.client
             .delete_object()

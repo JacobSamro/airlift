@@ -29,6 +29,10 @@ account, no EAS subscription, no external database.
 - **Assets never transit the server twice** — files are content-addressed,
   deduplicated per org, and served as `307` redirects to presigned S3/CDN
   URLs.
+- **bsdiff incremental updates (SDK 55+)** — devices that send `A-IM: bsdiff`
+  get a binary patch between their current launch bundle and the new one
+  (often 5–20× smaller), generated lazily in the background and served as
+  `226 IM Used`; anything else falls back to the full bundle automatically.
 - **Client monitoring** — device check-ins, per-update adoption, daily
   activity series; Prometheus metrics at `/metrics`.
 - **Multi-tenant** — orgs, members, teams with per-app permissions

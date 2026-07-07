@@ -448,6 +448,21 @@ pub async fn previous_group(db: &Db, group: &UpdateGroup) -> Result<Option<Updat
     Ok(g)
 }
 
+/// Look up an update by id, confined to one app.
+pub async fn find_update_in_app(db: &Db, app_id: &str, update_id: &str) -> Result<Option<Update>> {
+    let u = sqlx::query_as::<_, Update>(
+        "SELECT u.* FROM updates u
+         JOIN update_groups g ON g.id = u.group_id
+         JOIN branches b ON b.id = g.branch_id
+         WHERE b.app_id = ? AND lower(u.id) = lower(?)",
+    )
+    .bind(app_id)
+    .bind(update_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(u)
+}
+
 /// Per-platform updates of a group.
 pub async fn updates_in_group(db: &Db, group_id: &str) -> Result<Vec<Update>> {
     let u =

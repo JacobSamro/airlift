@@ -442,6 +442,122 @@ async fn asset_endpoint_is_app_confined() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn bsdiff_patch_lifecycle() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    // v1: the update the device currently runs. Download its bundle like the
+    // device did (it's the patch base on disk).
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "p1")).await;
+    assert_eq!(status, 201);
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
+    let m1 = verified_part(&ctx, resp, "manifest").await;
+    let v1_id = m1["id"].as_str().unwrap().to_string();
+    let v1_url = m1["launchAsset"]["url"].as_str().unwrap().to_string();
+    let v1_redirect = ctx.http.get(&v1_url).send().await.unwrap();
+    assert_eq!(v1_redirect.status(), 307);
+    let loc = v1_redirect.headers()["location"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let v1_bundle = reqwest::get(&loc)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec();
+
+    // v2: what the device is updating to.
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "p2")).await;
+    assert_eq!(status, 201);
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", Some(&v1_id)).await;
+    let m2 = verified_part(&ctx, resp, "manifest").await;
+    let v2_id = m2["id"].as_str().unwrap().to_string();
+    let v2_url = m2["launchAsset"]["url"].as_str().unwrap().to_string();
+    let v2_hash = m2["launchAsset"]["hash"].as_str().unwrap().to_string();
+
+    let patch_request = || {
+        ctx.http
+            .get(&v2_url)
+            .header("A-IM", "bsdiff")
+            .header("Expo-Current-Update-ID", &v1_id)
+            .header("Expo-Requested-Update-ID", &v2_id)
+            .send()
+    };
+
+    // First patch-capable request: nothing is ready yet → full bundle (307)
+    // and the pair is enqueued for generation.
+    let first = patch_request().await.unwrap();
+    assert_eq!(
+        first.status(),
+        307,
+        "first request falls back to full bundle"
+    );
+
+    // The 1s worker builds the patch; poll until the 226 arrives.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let resp = loop {
+        let resp = patch_request().await.unwrap();
+        if resp.status() == 226 {
+            break resp;
+        }
+        assert_eq!(resp.status(), 307, "only full-bundle fallback while queued");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "patch never became ready"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    };
+    assert_eq!(resp.headers()["im"].to_str().unwrap(), "bsdiff");
+    assert_eq!(
+        resp.headers()["expo-base-update-id"]
+            .to_str()
+            .unwrap()
+            .to_lowercase(),
+        v1_id.to_lowercase()
+    );
+    let patch = resp.bytes().await.unwrap().to_vec();
+    // Classic bsdiff container — the only thing the client's bspatch accepts.
+    assert_eq!(&patch[..8], b"BSDIFF40");
+
+    // Apply the patch exactly like the device and verify the manifest hash.
+    let mut patched = Vec::new();
+    qbsdiff::Bspatch::new(&patch)
+        .unwrap()
+        .apply(&v1_bundle, std::io::Cursor::new(&mut patched))
+        .unwrap();
+    let expect = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&v2_hash)
+        .unwrap();
+    assert_eq!(
+        hex::encode(expect),
+        sha256_hex(&patched),
+        "patched bundle matches manifest hash"
+    );
+
+    // A plain request (no A-IM) still gets the full-bundle redirect.
+    let resp = ctx.http.get(&v2_url).send().await.unwrap();
+    assert_eq!(resp.status(), 307);
+
+    // An unknown base update id can't get a patch.
+    let resp = ctx
+        .http
+        .get(&v2_url)
+        .header("A-IM", "bsdiff")
+        .header(
+            "Expo-Current-Update-ID",
+            "00000000-0000-0000-0000-000000000000",
+        )
+        .header("Expo-Requested-Update-ID", &v2_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 307);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn client_monitoring_and_metrics() {
     let stub = spawn_s3_stub().await;
     let server = Airlift::spawn(&stub).await;

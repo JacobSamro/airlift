@@ -22,3 +22,6 @@ Initial development.
   rollback, tokens, instance settings, domains + automatic Let's Encrypt TLS).
 - `airlift-cli` npm package: init / publish / promote / rollback / list.
 - Asset garbage collection with grace window (`airlift gc` + background loop).
+- bsdiff incremental launch-bundle patches (SDK 55+ `A-IM: bsdiff` → `226 IM
+  Used`, classic BSDIFF40): lazy background generation, integrity-gated
+  inputs, not-beneficial cutoff, automatic full-bundle fallback.

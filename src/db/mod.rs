@@ -5,6 +5,7 @@ pub mod audit;
 pub mod clients;
 pub mod domains;
 pub mod orgs;
+pub mod patches;
 pub mod settings;
 pub mod updates;
 pub mod users;

@@ -202,13 +202,18 @@ impl Airlift {
 
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_airlift"));
         cmd.args(["--config", &cfg, "serve"])
-            .env("RUST_LOG", "error")
+            .env(
+                "RUST_LOG",
+                std::env::var("AIRLIFT_TEST_LOG").unwrap_or_else(|_| "error".into()),
+            )
             .env("AIRLIFT_DATABASE__PATH", &db_path)
             .env("AIRLIFT_SERVER__HTTP_ADDR", format!("127.0.0.1:{port}"))
             // TLS defaults on; the e2e drives plain HTTP on a loopback port.
             .env("AIRLIFT_TLS__ENABLED", "false")
             // Flush check-in counters every second so tests can observe them.
             .env("AIRLIFT_ANALYTICS__ROLLUP_SECS", "1")
+            // Generate queued bsdiff patches quickly in tests.
+            .env("AIRLIFT_PATCHES__POLL_SECS", "1")
             .env("AIRLIFT_STORAGE__ENDPOINT", format!("http://{stub}"))
             .env("AIRLIFT_STORAGE__BUCKET", "test")
             .env("AIRLIFT_STORAGE__REGION", "us-east-1")
@@ -289,7 +294,13 @@ pub fn export_zip(platforms: &[&str], seed: &str) -> Vec<u8> {
     files.push((format!("assets/{asset_name}"), asset_bytes));
 
     for platform in platforms {
-        let bundle = format!("// bundle for {platform} — {seed}\nconsole.log('hi');").into_bytes();
+        // A large shared body + a seed-specific tail: successive seeds make
+        // realistic bsdiff inputs (mostly identical, so a patch is small).
+        let shared: String = (0..2000)
+            .map(|i| format!("function fn{i}() {{ return {}; }}\n", i * 7))
+            .collect();
+        let bundle = format!("// bundle for {platform} — {seed}\n{shared}console.log('{seed}');")
+            .into_bytes();
         let bundle_path = format!("_expo/static/js/{platform}/entry-{seed}.hbc");
         files.push((bundle_path.clone(), bundle));
         file_metadata.insert(
