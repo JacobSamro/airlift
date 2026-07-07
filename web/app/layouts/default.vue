@@ -20,6 +20,11 @@ const currentSlug = computed(
   () => (route.params.slug as string) || me.value?.orgs[0]?.slug || "",
 );
 
+// Overview doubles as the apps home, so keep it highlighted on app detail pages.
+const onAppsPath = computed(() =>
+  route.path.startsWith(`/orgs/${currentSlug.value}/apps`),
+);
+
 const nav = computed(() => {
   const s = currentSlug.value;
   if (!s) return [];
@@ -89,7 +94,7 @@ const activeClass = "bg-accent !text-accent-foreground";
           v-for="n in nav"
           :key="n.to"
           :to="n.to"
-          :class="linkClass"
+          :class="[linkClass, n.exact && onAppsPath ? activeClass : '']"
           :active-class="n.exact ? '' : activeClass"
           :exact-active-class="activeClass"
         >

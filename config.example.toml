@@ -1,0 +1,44 @@
+# airlift configuration. Copy to /etc/airlift/config.toml and edit.
+# Any value can also be set via environment, e.g. AIRLIFT_STORAGE__BUCKET=my-bucket.
+# Secrets (storage keys) are best supplied via environment, not this file.
+
+[server]
+http_addr = "0.0.0.0:80"
+https_addr = "0.0.0.0:443"
+public_url = "https://updates.example.com"
+max_body_bytes = 268435456           # 256 MiB cap for uploaded export archives
+trust_proxy = false                  # true only behind a trusted proxy that sets
+                                     # X-Forwarded-For / X-Real-IP (rate limiting)
+
+[database]
+path = "/var/lib/airlift/airlift.db"
+
+[storage]
+endpoint = "https://t3.storage.dev"  # Tigris S3 endpoint (any S3-compatible works)
+bucket = "my-updates-bucket"
+region = "auto"
+# access_key_id = "..."              # prefer AIRLIFT_STORAGE__ACCESS_KEY_ID
+# secret_access_key = "..."          # prefer AIRLIFT_STORAGE__SECRET_ACCESS_KEY
+presign_ttl_secs = 900               # 15 min presigned-URL lifetime on asset downloads
+force_path_style = false
+# cdn_url = "https://cdn.example.com"  # custom domain / CDN for asset redirects
+# Tip: all [storage] values can also be edited live in the dashboard under
+# Settings -> Storage (admin) — those override what's set here.
+
+[auth]
+# secret_key left empty -> auto-generated and stored in the database on first run
+session_ttl_secs = 604800            # dashboard session lifetime (7 days)
+
+[tls]
+enabled = true                       # automatic Let's Encrypt (serves HTTP until a domain is added)
+contact_email = "admin@example.com"
+staging = false                      # use Let's Encrypt staging for testing
+cache_dir = "/var/lib/airlift/acme"
+
+[gc]
+interval_secs = 0                    # background asset GC interval; 0 disables (run `airlift gc`)
+grace_secs = 3600                    # never collect assets younger than this (protects in-flight publishes)
+
+[analytics]
+enabled = true                       # device check-ins + adoption stats (in-memory + daily rollups)
+rollup_secs = 60                     # how often to flush check-in counters to SQLite

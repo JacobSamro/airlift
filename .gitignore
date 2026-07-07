@@ -21,3 +21,7 @@ web/tests/e2e/.tmp
 
 .DS_Store
 CLAUDE.md
+
+# publish CLI
+cli/node_modules
+cli/dist

@@ -246,6 +246,29 @@ pub async fn ensure_asset(
         .ok_or(crate::error::Error::NotFound)
 }
 
+/// Assets older than `cutoff` referenced by no update (neither as a file nor
+/// as a launch bundle). Returns (id, org_id, sha256) for the GC sweep.
+pub async fn unreferenced_assets(db: &Db, cutoff: &str) -> Result<Vec<(String, String, String)>> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT a.id, a.org_id, a.sha256 FROM assets a
+         WHERE a.created_at < ?
+           AND NOT EXISTS (SELECT 1 FROM update_assets ua WHERE ua.asset_id = a.id)
+           AND NOT EXISTS (SELECT 1 FROM updates u WHERE u.launch_asset_id = a.id)",
+    )
+    .bind(cutoff)
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn delete_asset(db: &Db, asset_id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM assets WHERE id = ?")
+        .bind(asset_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 // ───────────────────────── update groups / updates ─────────────────────────
 
 #[allow(clippy::too_many_arguments)]

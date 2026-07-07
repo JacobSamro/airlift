@@ -220,8 +220,18 @@ function closeCreate() {
 
         <div v-if="scopeType === 'app'" class="flex flex-col gap-1.5">
           <label class="text-sm font-medium">App</label>
-          <UiInput v-model="scopeApp" placeholder="my-app" data-testid="token-app" />
-          <p class="text-xs text-muted-foreground">The app's slug within the organization.</p>
+          <Select v-model="scopeApp" :disabled="orgAppsLoading || !orgApps.length">
+            <SelectTrigger class="w-full" data-testid="token-app">
+              <SelectValue :placeholder="orgAppsLoading ? 'Loading apps…' : 'Select an app…'" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="a in orgApps" :key="a.id" :value="a.slug">{{ a.name }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <p v-if="!orgAppsLoading && !orgApps.length" class="text-xs text-muted-foreground">
+            This organization has no apps yet.
+          </p>
+          <p v-else class="text-xs text-muted-foreground">The app this token is limited to.</p>
         </div>
 
         <div class="flex justify-end gap-2">

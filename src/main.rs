@@ -6,6 +6,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod gc;
 mod keys;
 mod models;
 mod protocol;
@@ -50,6 +51,8 @@ enum Command {
     Serve,
     /// Apply pending database migrations and exit.
     Migrate,
+    /// Run a one-off garbage-collection sweep (delete unreferenced assets).
+    Gc,
     /// Administrative commands for bootstrapping (orgs, users, tokens).
     #[command(subcommand)]
     Admin(AdminCommand),
@@ -116,6 +119,17 @@ async fn main() -> anyhow::Result<()> {
             db::migrate(&pool).await?;
             tracing::info!("migrations applied");
         }
+        Command::Gc => {
+            let pool = db::connect(&config.database.path).await?;
+            db::migrate(&pool).await?;
+            let secret_key =
+                db::settings::ensure_secret_key(&pool, &config.auth.secret_key).await?;
+            let storage_cfg = db::settings::effective_storage(&pool, &config.storage).await?;
+            let storage = storage::Storage::new(&storage_cfg).await?;
+            let state = state::AppState::new(config, pool, storage, secret_key);
+            let n = gc::run(&state).await?;
+            println!("garbage collected {n} asset(s)");
+        }
         Command::Admin(cmd) => {
             let pool = db::connect(&config.database.path).await?;
             db::migrate(&pool).await?;
@@ -135,12 +149,15 @@ async fn main() -> anyhow::Result<()> {
             let http_addr = config.server.http_addr.clone();
             let analytics_enabled = config.analytics.enabled;
             let rollup_secs = config.analytics.rollup_secs;
+            let gc_interval = config.gc.interval_secs;
             let state = state::AppState::new(config, pool, storage, secret_key);
             // Derive the effective public URL from config or the primary domain
             // before serving, so manifest asset URLs are correct on the first
             // request (no restart needed after a domain is later added).
             state.refresh_public_url().await;
             let app = server::router(state.clone());
+
+            tokio::spawn(gc::background(state.clone(), gc_interval));
 
             if analytics_enabled {
                 tokio::spawn(analytics::flush_loop(state.clone(), rollup_secs));

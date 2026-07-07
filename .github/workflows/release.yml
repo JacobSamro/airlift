@@ -1,0 +1,240 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Gate the release on the same checks CI runs, once, before building artifacts.
+  check:
+    name: Gate (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-embed bundles web/.output/public at compile time — build it first.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build web UI
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run generate
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt / clippy / test
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --release --locked
+
+  build:
+    name: Build & package (${{ matrix.target }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build web UI
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run generate
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          NAME="airlift-${{ matrix.target }}"
+          mkdir -p "stage/${NAME}"
+          cp "target/${{ matrix.target }}/release/airlift" "stage/${NAME}/"
+          strip "stage/${NAME}/airlift" || true
+          cp README.md LICENSE config.example.toml "stage/${NAME}/"
+          cp packaging/airlift.service "stage/${NAME}/"
+          mkdir -p dist
+          # Binary sits at the archive root so install.sh can extract it directly.
+          tar -C "stage/${NAME}" -czf "dist/${NAME}.tar.gz" .
+          ( cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      # Only the binary artifacts — avoids racing the parallel image jobs'
+      # *.dockerbuild artifacts (which caused the download to fail).
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          pattern: "*-unknown-linux-gnu"
+          merge-multiple: true
+
+      - name: Assemble release assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -name '*.tar.gz' -exec cp {} dist/ \;
+          ( cd dist && sha256sum *.tar.gz > SHA256SUMS )
+          cp install.sh dist/install.sh
+          cp packaging/airlift.service dist/airlift.service
+          echo "── release assets ──"; ls -1 dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ contains(steps.ver.outputs.tag, '-') }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/install.sh
+            dist/airlift.service
+
+  # Build the container image per-arch on native runners (no QEMU), push each by
+  # digest to GHCR, then stitch a multi-arch manifest list with the real tags.
+  image:
+    name: image (${{ matrix.platform }})
+    needs: check
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            os: ubuntu-22.04
+          - platform: linux/arm64
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      # GHCR requires a lowercase image name; github.repository may be mixed-case.
+      - name: Image name
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.img.outputs.name }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.img.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+        env:
+          digest: ${{ steps.build.outputs.digest }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: digest-${{ matrix.os }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  image-manifest:
+    name: push multi-arch image
+    needs: image
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+      - name: Image name
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.img.outputs.name }}
+          # The exact version always; major.minor + latest only for non-prereleases.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      - name: Create + push manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.img.outputs.name }}@sha256:%s ' *)
+      - name: Inspect
+        run: docker buildx imagetools inspect ${{ steps.img.outputs.name }}:${{ steps.meta.outputs.version }}
