@@ -43,7 +43,12 @@ pub fn router(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(healthz))
         .merge(crate::api::routes())
-        .fallback(crate::web::handler);
+        .merge(crate::protocol::routes())
+        .fallback(crate::web::handler)
+        // Bounds uploaded `expo export` archives (axum's default is 2 MB).
+        .layer(axum::extract::DefaultBodyLimit::max(
+            state.config().server.max_body_bytes,
+        ));
 
     if hsts {
         router = router.layer(SetResponseHeaderLayer::overriding(

@@ -146,6 +146,11 @@ CREATE TABLE update_groups (
     git_branch      TEXT,
     git_commit      TEXT,
     group_type      TEXT NOT NULL DEFAULT 'normal', -- normal | rollback_to_embedded
+    -- Resolved Expo config at export time (manifest `extra.expoClient`).
+    expo_config_json TEXT,
+    -- Digest over the group's platform launch bundles + assets, used to refuse
+    -- publishing a byte-identical duplicate of the branch head (409).
+    content_hash    TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL
 );
 CREATE INDEX idx_groups_branch_runtime ON update_groups (branch_id, runtime_version, created_at);

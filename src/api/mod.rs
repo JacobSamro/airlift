@@ -1,6 +1,9 @@
 //! Dashboard REST API (`/api/v1`), authenticated by the session cookie (or a
 //! PAT for the automation-facing endpoints).
 
+pub mod apps;
+pub mod publish;
+
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -33,6 +36,43 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/orgs", get(list_orgs).post(create_org))
         .route("/api/v1/admin/orgs", get(list_all_orgs))
         .route("/api/v1/orgs/{slug}", get(get_org))
+        .route(
+            "/api/v1/orgs/{slug}/apps",
+            get(apps::list_apps).post(apps::create_app),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}",
+            get(apps::get_app).delete(apps::delete_app),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/certificate",
+            get(apps::get_certificate),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/updates",
+            get(apps::list_updates),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/channels",
+            post(apps::create_channel),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/channels/{channel}",
+            axum::routing::patch(apps::update_channel).delete(apps::delete_channel),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/channels/{channel}/promote",
+            post(apps::promote),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/channels/{channel}/rollback",
+            post(apps::rollback),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/branches/{branch}/rollback-to-embedded",
+            post(apps::rollback_to_embedded),
+        )
+        .route("/api/v1/apps/{app_id}/updates", post(publish::publish))
         .route(
             "/api/v1/orgs/{slug}/members",
             get(list_members).post(add_member),

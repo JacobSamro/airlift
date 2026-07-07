@@ -5,6 +5,7 @@ pub mod audit;
 pub mod domains;
 pub mod orgs;
 pub mod settings;
+pub mod updates;
 pub mod users;
 
 use std::path::Path;

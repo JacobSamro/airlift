@@ -27,7 +27,7 @@ path = "src/main.rs"
 [dependencies]
 # Async runtime + web
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["macros", "http2"] }
+axum = { version = "0.8", features = ["macros", "http2", "multipart"] }
 axum-extra = { version = "0.10", features = ["typed-header", "cookie"] }
 tower = { version = "0.5", features = ["util", "limit"] }
 tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors", "set-header", "limit"] }
@@ -57,6 +57,9 @@ rand = "0.8"
 # RSA-SHA256 (pkcs1v15) and the self-signed X.509 cert is embedded in the app.
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "aws_lc_rs"] }
+
+# Reading uploaded `expo export` archives
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Serialization + config
 serde = { version = "1", features = ["derive"] }
@@ -111,6 +114,11 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 tempfile = "3"
+# The e2e acts as an expo-updates client: builds export zips, parses the
+# app certificate, and verifies manifest signatures.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+x509-parser = "0.16"
 
 [profile.release]
 opt-level = 3
