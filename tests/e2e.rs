@@ -426,6 +426,33 @@ async fn gated_channels_and_promotion_flow() {
     let m = verified_part(&ctx, resp, "manifest").await;
     assert_eq!(m["id"].as_str().unwrap(), main_update);
 
+    // A channel with no branch is served purely by promote.
+    let resp = ctx
+        .http
+        .post(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/channels",
+            ctx.base
+        ))
+        .json(&json!({ "name": "beta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let resp = ctx
+        .http
+        .post(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/channels/beta/promote",
+            ctx.base
+        ))
+        .json(&json!({ "group_id": group2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = manifest_request(&ctx, "beta", "1.0.0", "ios", "1", None).await;
+    let beta = verified_part(&ctx, resp, "manifest").await;
+    assert_eq!(beta["launchAsset"]["hash"], m["launchAsset"]["hash"]);
+
     // Repointing production at another branch serves that branch's head at
     // once, without waiting for the next publish there.
     let (status, _) = publish(&ctx, "hotfix", "1.0.0", export_zip(&["ios"], "h1")).await;

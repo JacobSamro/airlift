@@ -107,10 +107,9 @@ async fn manifest(
         .await?
         .ok_or_else(|| Error::bad_request("unknown channel"))?;
 
-    let group = match &channel.branch_id {
-        Some(_) => db::updates::channel_release(state.db(), &channel.id, &runtime_version).await?,
-        None => None,
-    };
+    // The release pointer is the source of truth, whether or not the channel
+    // tracks a branch (a branchless channel is served purely by promote).
+    let group = db::updates::channel_release(state.db(), &channel.id, &runtime_version).await?;
 
     let Some(group) = group else {
         track("no_update", "");
