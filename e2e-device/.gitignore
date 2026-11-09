@@ -1,0 +1,9 @@
+.work/
+app/node_modules/
+app/android/
+app/ios/
+app/.expo/
+app/dist/
+# written by `airlift init` during a run
+app/airlift.json
+app/certs/

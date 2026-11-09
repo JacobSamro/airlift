@@ -1,0 +1,14 @@
+# Cold-start the app and assert which bundle it launched.
+# env: MARKER (embedded|v2|…), ORIGIN (embedded|update)
+appId: dev.airlift.e2e
+---
+- launchApp:
+    stopApp: true
+- extendedWaitUntil:
+    visible:
+      id: marker
+      text: "marker:${MARKER}"
+    timeout: 60000
+- assertVisible:
+    id: origin
+    text: "origin:${ORIGIN}"

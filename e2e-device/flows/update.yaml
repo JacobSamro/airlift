@@ -1,0 +1,17 @@
+# Tap "Check for update" (checkForUpdateAsync → fetchUpdateAsync →
+# reloadAsync) and assert the app reloaded into the expected bundle.
+# env: MARKER, ORIGIN
+appId: dev.airlift.e2e
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: check
+- extendedWaitUntil:
+    visible:
+      id: marker
+      text: "marker:${MARKER}"
+    timeout: 120000
+- assertVisible:
+    id: origin
+    text: "origin:${ORIGIN}"

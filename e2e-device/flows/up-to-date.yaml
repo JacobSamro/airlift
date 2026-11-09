@@ -1,0 +1,12 @@
+# Tap "Check for update" and assert the server reported nothing new.
+appId: dev.airlift.e2e
+---
+- launchApp:
+    stopApp: false
+- tapOn:
+    id: check
+- extendedWaitUntil:
+    visible:
+      id: status
+      text: "status:up-to-date.*"
+    timeout: 60000

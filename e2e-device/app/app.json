@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "airlift-e2e",
+    "slug": "airlift-e2e",
+    "version": "1.0.0",
+    "runtimeVersion": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "bundleIdentifier": "dev.airlift.e2e",
+      "infoPlist": {
+        "NSAppTransportSecurity": { "NSAllowsArbitraryLoads": true }
+      }
+    },
+    "android": {
+      "package": "dev.airlift.e2e"
+    },
+    "updates": {
+      "checkAutomatically": "NEVER",
+      "fallbackToCacheTimeout": 0,
+      "enableBsdiffPatchSupport": true
+    },
+    "plugins": [
+      ["expo-build-properties", { "android": { "usesCleartextTraffic": true } }]
+    ]
+  }
+}

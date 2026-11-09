@@ -1,0 +1,148 @@
+name: Device e2e
+
+# A real Expo release build (expo-updates, code signing on) on an Android
+# emulator and an iOS simulator, updating over the air from a real airlift
+# server. The scenario lives in e2e-device/run.sh; Maestro drives the UI.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    paths:
+      - "src/**"
+      - "migrations/**"
+      - "cli/**"
+      - "e2e-device/**"
+      - "tests/common/s3_stub.rs"
+      - "examples/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/device-e2e.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: device-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  android:
+    name: Android emulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+
+      # rust-embed bundles web/.output/public at compile time.
+      - name: Build web UI
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run generate
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build airlift + S3 stub
+        run: cargo build --release --locked --bin airlift --example s3_stub
+
+      - name: Install Maestro
+        run: |
+          curl -fsSL "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run device e2e
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          # One line on purpose: the action runs each script line in its own shell.
+          script: SKIP_CARGO_BUILD=1 ./e2e-device/run.sh android
+
+      - name: Upload Maestro output + server logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: device-e2e-android
+          path: |
+            e2e-device/.work/maestro
+            e2e-device/.work/*.log
+          if-no-files-found: ignore
+
+  ios:
+    name: iOS simulator
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v6 # Maestro runs on the JVM
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build web UI
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run generate
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build airlift + S3 stub
+        run: cargo build --release --locked --bin airlift --example s3_stub
+
+      - name: Install Maestro
+        run: |
+          curl -fsSL "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Boot iOS simulator
+        id: sim
+        uses: futureware-tech/simulator-action@v6
+        with:
+          os: iOS
+          model: iPhone 17
+          wait_for_boot: true
+
+      - name: Run device e2e
+        env:
+          SKIP_CARGO_BUILD: "1"
+          SIM_UDID: ${{ steps.sim.outputs.udid }}
+        run: ./e2e-device/run.sh ios
+
+      - name: Upload Maestro output + server logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: device-e2e-ios
+          path: |
+            e2e-device/.work/maestro
+            e2e-device/.work/*.log
+          if-no-files-found: ignore
