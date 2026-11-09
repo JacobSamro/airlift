@@ -68,6 +68,8 @@ export interface Channel {
   branch_id: string | null;
   auto_release: boolean;
   releases: ChannelRelease[];
+  /** A/B split: share of devices served from another channel. */
+  split: { channel: string | null; percent: number } | null;
 }
 export interface UpdateGroup {
   id: string;

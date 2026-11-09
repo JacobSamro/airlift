@@ -238,6 +238,56 @@ async function submitPromote() {
   }
 }
 
+// ── A/B splits ─────────────────────────────────────────────────────────────
+
+const splitChannel = ref<Channel | null>(null);
+const splitBranch = ref("");
+const splitPercent = ref(50);
+
+function openSplit(ch: Channel) {
+  splitChannel.value = ch;
+  splitPercent.value = ch.split?.percent ?? 50;
+  // Managed split channels are named "<channel>~<branch>".
+  const managed = ch.split?.channel?.startsWith(`${ch.name}~`)
+    ? ch.split.channel.slice(ch.name.length + 1)
+    : "";
+  splitBranch.value = managed || branches.value.find((b) => b.name !== ch.branch)?.name || "";
+}
+
+async function submitSplit() {
+  const ch = splitChannel.value;
+  if (!ch || !splitBranch.value) return;
+  error.value = "";
+  try {
+    await api.put(`/api/v1/orgs/${slug.value}/apps/${appSlug.value}/channels/${ch.name}/split`, {
+      branch: splitBranch.value,
+      percent: Number(splitPercent.value),
+    });
+    splitChannel.value = null;
+    await load();
+  } catch (e) {
+    error.value = apiErrorMessage(e);
+  }
+}
+
+async function clearSplit(ch: Channel) {
+  if (
+    !(await confirm({
+      title: "End A/B split",
+      message: `Send every device on "${ch.name}" back to its own branch?`,
+      confirmText: "End split",
+    }))
+  )
+    return;
+  error.value = "";
+  try {
+    await api.del(`/api/v1/orgs/${slug.value}/apps/${appSlug.value}/channels/${ch.name}/split`);
+    await load();
+  } catch (e) {
+    error.value = apiErrorMessage(e);
+  }
+}
+
 // ── Rollouts ───────────────────────────────────────────────────────────────
 
 const rolloutTarget = ref<{ ch: Channel; r: ChannelRelease } | null>(null);
@@ -452,7 +502,33 @@ const gitRef = (u: UpdateGroup) =>
                 </ul>
               </div>
 
-              <div class="flex justify-end border-t border-border pt-3">
+              <div
+                v-if="ch.split"
+                class="flex items-center justify-between gap-2 rounded-[var(--radius)] border border-border px-3 py-2 text-xs"
+                :data-testid="`split-${ch.name}`"
+              >
+                <span>
+                  A/B: <span class="font-mono">{{ ch.split.percent }}%</span> of devices get
+                  <span class="font-mono">{{ ch.split.channel }}</span>
+                </span>
+                <span class="flex gap-1">
+                  <UiButton variant="ghost" size="sm" @click="openSplit(ch)">Edit</UiButton>
+                  <UiButton variant="ghost" size="sm" @click="clearSplit(ch)">End</UiButton>
+                </span>
+              </div>
+
+              <div class="flex justify-end gap-2 border-t border-border pt-3">
+                <UiButton
+                  v-if="!ch.split"
+                  variant="outline"
+                  size="sm"
+                  :disabled="branches.length < 2"
+                  :title="branches.length < 2 ? 'Publish a second branch first' : 'Serve another branch to a share of devices'"
+                  :data-testid="`channel-split-${ch.name}`"
+                  @click="openSplit(ch)"
+                >
+                  <UiIcon name="branch" :size="14" /> A/B split…
+                </UiButton>
                 <UiButton
                   variant="outline"
                   size="sm"
@@ -705,6 +781,46 @@ const gitRef = (u: UpdateGroup) =>
             <UiButton type="submit" :disabled="!promoteChannelName">
               {{ promotePercent < 100 ? `Roll out to ${promotePercent}%` : "Promote" }}
             </UiButton>
+          </div>
+        </form>
+      </UiModal>
+
+      <!-- A/B split dialog -->
+      <UiModal
+        :open="!!splitChannel"
+        :title="`A/B split on ${splitChannel?.name ?? ''}`"
+        @close="splitChannel = null"
+      >
+        <form class="flex flex-col gap-4" @submit.prevent="submitSplit">
+          <p class="text-sm text-muted-foreground">
+            A stable share of devices (bucketed by device id) is served another branch; the rest keep
+            <span class="font-mono text-xs">{{ splitChannel?.branch ?? "the channel's branch" }}</span>.
+            Devices stay on their side as you grow the split.
+          </p>
+          <div class="flex flex-col gap-1.5">
+            <label class="text-sm font-medium">Branch B</label>
+            <Select v-model="splitBranch">
+              <SelectTrigger class="w-full" data-testid="split-branch">
+                <SelectValue placeholder="Select a branch…" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="b in branches.filter((b) => b.name !== splitChannel?.branch)"
+                  :key="b.id"
+                  :value="b.name"
+                >
+                  {{ b.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div class="flex items-center gap-3">
+            <input v-model.number="splitPercent" type="range" min="1" max="99" class="flex-1" data-testid="split-percent" />
+            <span class="w-12 text-right font-mono text-sm">{{ splitPercent }}%</span>
+          </div>
+          <div class="flex justify-end gap-2">
+            <UiButton variant="outline" type="button" @click="splitChannel = null">Cancel</UiButton>
+            <UiButton type="submit" :disabled="!splitBranch">Split {{ splitPercent }}%</UiButton>
           </div>
         </form>
       </UiModal>

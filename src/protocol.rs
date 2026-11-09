@@ -174,6 +174,23 @@ async fn manifest_inner(
     let channel = db::updates::find_channel(state.db(), &app.id, &channel_name)
         .await?
         .ok_or_else(|| Error::bad_request("unknown channel"))?;
+    // A/B split: a stable share of devices is served from another channel
+    // (the experiment branch). One hop only — the target's own split is not
+    // followed.
+    let channel = match (
+        &channel.split_channel_id,
+        channel.split_percent,
+        &channel.split_salt,
+    ) {
+        (Some(target), Some(pct), Some(salt))
+            if crate::rollout::included(client_id.as_deref(), salt, pct) =>
+        {
+            db::updates::find_channel_by_id(state.db(), target)
+                .await?
+                .unwrap_or(channel)
+        }
+        _ => channel,
+    };
 
     // The release pointer is the source of truth, whether or not the channel
     // tracks a branch (a branchless channel is served purely by promote).

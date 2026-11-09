@@ -1250,3 +1250,75 @@ async fn progressive_rollout_buckets_devices_stably() {
     // Nothing left to adjust.
     assert_eq!(set(50.0).await.unwrap().status(), 400);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ab_split_serves_two_branches_on_one_channel() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "ctrl")).await;
+    assert_eq!(status, 201);
+    let control = offered(&ctx, Some("probe")).await.unwrap();
+    let (status, _) = publish(&ctx, "experiment", "1.0.0", export_zip(&["ios"], "exp")).await;
+    assert_eq!(status, 201);
+
+    let split = |body: Value| {
+        ctx.http
+            .put(format!(
+                "{}/api/v1/orgs/acme/apps/mobile/channels/production/split",
+                ctx.base
+            ))
+            .json(&body)
+            .send()
+    };
+    let resp = split(json!({ "branch": "experiment", "percent": 50 }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let devices: Vec<String> = (0..100).map(|i| format!("ab-{i}")).collect();
+    let mut b_side = Vec::new();
+    for d in &devices {
+        if offered(&ctx, Some(d)).await.unwrap() != control {
+            b_side.push(d.clone());
+        }
+    }
+    assert!(
+        (25..75).contains(&b_side.len()),
+        "~50/100: {}",
+        b_side.len()
+    );
+    // No client id → always the channel's own branch.
+    assert_eq!(offered(&ctx, None).await.unwrap(), control);
+
+    // A new publish on the experiment branch reaches the B side only.
+    let (status, _) = publish(&ctx, "experiment", "1.0.0", export_zip(&["ios"], "exp2")).await;
+    assert_eq!(status, 201);
+    let b_now = offered(&ctx, Some(&b_side[0])).await.unwrap();
+    assert_ne!(b_now, control);
+    let a = devices.iter().find(|d| !b_side.contains(d)).unwrap();
+    assert_eq!(offered(&ctx, Some(a)).await.unwrap(), control);
+
+    // Growing the split keeps the B side stable.
+    let resp = split(json!({ "branch": "experiment", "percent": 80 }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    for d in &b_side {
+        assert_ne!(offered(&ctx, Some(d)).await.unwrap(), control);
+    }
+
+    // Clearing it sends everyone back to the channel's branch.
+    let resp = ctx
+        .http
+        .delete(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/channels/production/split",
+            ctx.base
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(offered(&ctx, Some(&b_side[0])).await.unwrap(), control);
+}

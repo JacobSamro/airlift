@@ -24,6 +24,11 @@ pub struct Channel {
     pub branch_id: Option<String>,
     pub auto_release: bool,
     pub created_at: String,
+    /// A/B split: share of devices sent to another channel.
+    pub split_channel_id: Option<String>,
+    pub split_percent: Option<f64>,
+    #[serde(skip_serializing)]
+    pub split_salt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -167,7 +172,44 @@ pub async fn create_channel<'e, E: sqlx::SqliteExecutor<'e>>(
         branch_id: branch_id.map(|s| s.to_string()),
         auto_release,
         created_at: now,
+        split_channel_id: None,
+        split_percent: None,
+        split_salt: None,
     })
+}
+
+pub async fn find_channel_by_id(db: &Db, channel_id: &str) -> Result<Option<Channel>> {
+    let c = sqlx::query_as::<_, Channel>("SELECT * FROM channels WHERE id = ?")
+        .bind(channel_id)
+        .fetch_optional(db)
+        .await?;
+    Ok(c)
+}
+
+/// Set (or clear, with `None`) a channel's A/B split. The salt is kept when
+/// only the percentage changes, so devices already in the split stay in as
+/// it grows; a new target channel re-buckets.
+pub async fn set_split(db: &Db, channel: &Channel, split: Option<(&str, f64)>) -> Result<()> {
+    let (target, pct, salt) = match split {
+        None => (None, None, None),
+        Some((target, pct)) => {
+            let salt = match (&channel.split_channel_id, &channel.split_salt) {
+                (Some(t), Some(s)) if t == target => s.clone(),
+                _ => uuid::Uuid::new_v4().to_string(),
+            };
+            (Some(target.to_string()), Some(pct), Some(salt))
+        }
+    };
+    sqlx::query(
+        "UPDATE channels SET split_channel_id = ?, split_percent = ?, split_salt = ? WHERE id = ?",
+    )
+    .bind(target)
+    .bind(pct)
+    .bind(salt)
+    .bind(&channel.id)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Point a channel at a (possibly different) branch and/or toggle gating.

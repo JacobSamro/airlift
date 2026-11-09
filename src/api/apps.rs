@@ -138,7 +138,15 @@ pub async fn get_app(
     let branches = db::updates::list_branches(state.db(), &app.id).await?;
     let channels = db::updates::list_channels(state.db(), &app.id).await?;
     let mut channel_views = Vec::with_capacity(channels.len());
+    let channel_names: std::collections::HashMap<String, String> = channels
+        .iter()
+        .map(|c| (c.id.clone(), c.name.clone()))
+        .collect();
     for ch in channels {
+        let split = match (&ch.split_channel_id, ch.split_percent) {
+            (Some(t), Some(p)) => json!({ "channel": channel_names.get(t), "percent": p }),
+            _ => serde_json::Value::Null,
+        };
         let releases = db::updates::releases_for_channel(state.db(), &ch.id).await?;
         let releases: Vec<_> = releases
             .into_iter()
@@ -166,6 +174,7 @@ pub async fn get_app(
             "branch": branch_name,
             "auto_release": ch.auto_release,
             "releases": releases,
+            "split": split,
         }));
     }
     Ok(json_ok(json!({
@@ -395,22 +404,7 @@ pub async fn update_channel(
         .as_deref()
         .filter(|b| ch.branch_id.as_deref() != Some(*b))
     {
-        let runtimes = db::updates::branch_runtime_versions(state.db(), new_branch).await?;
-        for rv in db::updates::releases_for_channel(state.db(), &ch.id)
-            .await?
-            .into_iter()
-            .map(|r| r.runtime_version)
-        {
-            if !runtimes.contains(&rv) {
-                db::updates::delete_channel_release(state.db(), &ch.id, &rv).await?;
-            }
-        }
-        for rv in runtimes {
-            if let Some(head) = db::updates::head_group(state.db(), new_branch, &rv).await? {
-                let head = db::updates::fresh_for_channel(state.db(), &ch.id, &head).await?;
-                db::updates::set_channel_release(state.db(), &ch.id, &rv, &head.id).await?;
-            }
-        }
+        release_branch_heads(&state, &ch.id, new_branch).await?;
     }
     db::audit::record(
         state.db(),
@@ -419,6 +413,129 @@ pub async fn update_channel(
         "channel.update",
         Some(&format!("{}/{}", app.slug, ch.name)),
         req.branch.as_deref(),
+    )
+    .await
+    .ok();
+    Ok(json_ok(json!({ "ok": true })))
+}
+
+/// Make a channel serve `branch_id`'s head for every runtime it has published
+/// (republished if older than what the channel served); runtimes the branch
+/// never published lose their pointer.
+async fn release_branch_heads(state: &AppState, channel_id: &str, branch_id: &str) -> Result<()> {
+    let runtimes = db::updates::branch_runtime_versions(state.db(), branch_id).await?;
+    for rv in db::updates::releases_for_channel(state.db(), channel_id)
+        .await?
+        .into_iter()
+        .map(|r| r.runtime_version)
+    {
+        if !runtimes.contains(&rv) {
+            db::updates::delete_channel_release(state.db(), channel_id, &rv).await?;
+        }
+    }
+    for rv in runtimes {
+        if let Some(head) = db::updates::head_group(state.db(), branch_id, &rv).await? {
+            let head = db::updates::fresh_for_channel(state.db(), channel_id, &head).await?;
+            db::updates::set_channel_release(state.db(), channel_id, &rv, &head.id).await?;
+        }
+    }
+    Ok(())
+}
+
+// ───────────────────────── A/B splits ─────────────────────────
+
+#[derive(Deserialize)]
+pub struct SplitReq {
+    /// Send the split share to this existing channel…
+    channel: Option<String>,
+    /// …or to this branch (served through a managed `<channel>~<branch>`
+    /// channel that tracks it, created on demand).
+    branch: Option<String>,
+    /// Share of devices (0 < p < 100) sent to the split.
+    percent: f64,
+}
+
+/// Serve two branches on one channel: a stable `percent` of devices (by the
+/// rollout bucketing, own salt) get the split target, the rest the channel.
+pub async fn set_split(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug, channel)): Path<(String, String, String)>,
+    Json(req): Json<SplitReq>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    if !(req.percent.is_finite() && req.percent > 0.0 && req.percent < 100.0) {
+        return Err(Error::bad_request("percent must be in (0, 100)"));
+    }
+    let ch = db::updates::find_channel(state.db(), &app.id, &channel)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let target = match (&req.channel, &req.branch) {
+        (Some(name), None) => db::updates::find_channel(state.db(), &app.id, name)
+            .await?
+            .ok_or_else(|| Error::bad_request("no such split channel"))?,
+        (None, Some(branch_name)) => {
+            let branch = db::updates::find_branch(state.db(), &app.id, branch_name)
+                .await?
+                .ok_or_else(|| Error::bad_request("no such branch"))?;
+            let managed = format!("{}~{}", ch.name, branch.name);
+            match db::updates::find_channel(state.db(), &app.id, &managed).await? {
+                Some(t) => t,
+                None => {
+                    let t = db::updates::create_channel(
+                        state.db(),
+                        &app.id,
+                        &managed,
+                        Some(&branch.id),
+                        ch.auto_release,
+                    )
+                    .await?;
+                    release_branch_heads(&state, &t.id, &branch.id).await?;
+                    t
+                }
+            }
+        }
+        _ => return Err(Error::bad_request("give exactly one of channel or branch")),
+    };
+    if target.id == ch.id {
+        return Err(Error::bad_request("a channel can't split to itself"));
+    }
+    db::updates::set_split(state.db(), &ch, Some((&target.id, req.percent))).await?;
+    db::audit::record(
+        state.db(),
+        Some(&caller.user.id),
+        Some(&app.org_id),
+        "channel.split",
+        Some(&format!("{}/{}", app.slug, ch.name)),
+        Some(&format!("{} {}%", target.name, req.percent)),
+    )
+    .await
+    .ok();
+    Ok(json_ok(json!({
+        "ok": true,
+        "split_channel": target.name,
+        "percent": req.percent,
+    })))
+}
+
+/// End an A/B split: every device gets the channel itself again.
+pub async fn clear_split(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug, channel)): Path<(String, String, String)>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let ch = db::updates::find_channel(state.db(), &app.id, &channel)
+        .await?
+        .ok_or(Error::NotFound)?;
+    db::updates::set_split(state.db(), &ch, None).await?;
+    db::audit::record(
+        state.db(),
+        Some(&caller.user.id),
+        Some(&app.org_id),
+        "channel.split",
+        Some(&format!("{}/{}", app.slug, ch.name)),
+        Some("cleared"),
     )
     .await
     .ok();
