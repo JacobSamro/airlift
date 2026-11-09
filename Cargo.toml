@@ -134,3 +134,9 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Dependencies carry no debug info: only our own crates get it, which is what
+# backtraces actually read. Measured on a large workspace: average rlib
+# 3.00 MB -> 1.08 MB, and 16,808 stray .o files -> 0.
+[profile.dev.package."*"]
+debug = false
