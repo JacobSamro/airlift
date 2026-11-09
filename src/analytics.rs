@@ -83,20 +83,21 @@ impl UsageCollector {
         }
     }
 
-    /// Drain everything collected so far.
+    /// Drain everything collected so far. Each entry is taken with an atomic
+    /// per-key `remove` (copy-then-`clear` dropped check-ins recorded in
+    /// between); anything recorded after its key was removed starts a fresh
+    /// entry for the next flush.
     fn drain(&self) -> (Vec<DrainedClient>, Vec<(DailyKey, u64)>) {
-        let clients: Vec<_> = self
-            .clients
-            .iter()
-            .map(|e| (e.key().clone(), e.value().clone()))
+        let client_keys: Vec<_> = self.clients.iter().map(|e| e.key().clone()).collect();
+        let clients = client_keys
+            .into_iter()
+            .filter_map(|k| self.clients.remove(&k))
             .collect();
-        self.clients.clear();
-        let daily: Vec<_> = self
-            .daily
-            .iter()
-            .map(|e| (e.key().clone(), *e.value()))
+        let daily_keys: Vec<_> = self.daily.iter().map(|e| e.key().clone()).collect();
+        let daily = daily_keys
+            .into_iter()
+            .filter_map(|k| self.daily.remove(&k))
             .collect();
-        self.daily.clear();
         (clients, daily)
     }
 }
