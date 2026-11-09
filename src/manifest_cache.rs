@@ -42,6 +42,7 @@ const SERVING_TABLES: &[&str] = &[
     "updates",
     "update_assets",
     "assets",
+    "app_signing_keys",
 ];
 
 pub fn generation() -> u64 {
@@ -83,22 +84,33 @@ pub async fn install_hooks(
 /// A part body with its RSA signature computed at most once.
 pub struct SignedBody {
     pub body: String,
-    sig: tokio::sync::OnceCell<String>,
+    /// Signature per keyid, computed on first use.
+    sigs: DashMap<String, String>,
 }
 
 impl SignedBody {
     fn new(body: String) -> Arc<Self> {
         Arc::new(Self {
             body,
-            sig: tokio::sync::OnceCell::new(),
+            sigs: DashMap::new(),
         })
     }
 
-    pub async fn signature(&self, app: &db::apps::App) -> Result<&str> {
-        self.sig
-            .get_or_try_init(|| crate::protocol::sign_for_app(app, self.body.as_bytes().to_vec()))
-            .await
-            .map(String::as_str)
+    /// The signature under `keyid` (one of `plan.keys`); unknown keyids are a
+    /// 400 (the client would reject a signature by another key anyway).
+    pub async fn signature(&self, plan: &Plan, keyid: &str) -> Result<String> {
+        if let Some(s) = self.sigs.get(keyid) {
+            return Ok(s.clone());
+        }
+        let pem = plan
+            .keys
+            .get(keyid)
+            .ok_or_else(|| Error::bad_request(format!("unknown signing keyid \"{keyid}\"")))?;
+        let sig =
+            crate::protocol::sign_with_key(&plan.app.id, keyid, pem, self.body.as_bytes().to_vec())
+                .await?;
+        self.sigs.insert(keyid.to_string(), sig.clone());
+        Ok(sig)
     }
 }
 
@@ -130,6 +142,8 @@ pub struct Release {
 pub struct Plan {
     pub app: Arc<db::apps::App>,
     pub no_update: Arc<SignedBody>,
+    /// keyid → private key PEM (`main` + any rotated keys).
+    pub keys: std::collections::HashMap<String, String>,
     main: Release,
     /// A/B split: (salt, percent, the split channel's release).
     split: Option<(String, f64, Release)>,
@@ -251,9 +265,15 @@ async fn build(state: &AppState, key: &Key) -> Result<Option<Plan>> {
         _ => None,
     };
     let no_update = SignedBody::new(json!({ "type": "noUpdateAvailable" }).to_string());
+    let keys = db::apps::signing_keys(state.db(), &app)
+        .await?
+        .into_iter()
+        .map(|k| (k.keyid, k.private_key_pem))
+        .collect();
     Ok(Some(Plan {
         app: Arc::new(app),
         no_update,
+        keys,
         main,
         split,
     }))

@@ -98,3 +98,54 @@ pub async fn delete(db: &Db, org_id: &str, app_id: &str) -> Result<()> {
         .await?;
     Ok(())
 }
+
+/// One of an app's code-signing keys (`main` is the one stored on `apps`).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct SigningKey {
+    pub keyid: String,
+    #[serde(skip_serializing)]
+    pub private_key_pem: String,
+    pub certificate_pem: String,
+    pub created_at: String,
+}
+
+/// All of an app's signing keys, `main` first.
+pub async fn signing_keys(db: &Db, app: &App) -> Result<Vec<SigningKey>> {
+    let mut keys = vec![SigningKey {
+        keyid: "main".into(),
+        private_key_pem: app.private_key_pem.clone(),
+        certificate_pem: app.certificate_pem.clone(),
+        created_at: app.created_at.clone(),
+    }];
+    keys.extend(
+        sqlx::query_as::<_, SigningKey>(
+            "SELECT keyid, private_key_pem, certificate_pem, created_at
+             FROM app_signing_keys WHERE app_id = ? ORDER BY created_at",
+        )
+        .bind(&app.id)
+        .fetch_all(db)
+        .await?,
+    );
+    Ok(keys)
+}
+
+pub async fn add_signing_key(
+    db: &Db,
+    app_id: &str,
+    keyid: &str,
+    private_key_pem: &str,
+    certificate_pem: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO app_signing_keys (app_id, keyid, private_key_pem, certificate_pem, created_at)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(app_id)
+    .bind(keyid)
+    .bind(private_key_pem)
+    .bind(certificate_pem)
+    .bind(now_rfc3339())
+    .execute(db)
+    .await?;
+    Ok(())
+}

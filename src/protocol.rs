@@ -140,7 +140,9 @@ async fn manifest_inner(
     }
     let current_update_id =
         param(headers, query, "expo-current-update-id").map(|s| s.to_ascii_lowercase());
-    let expect_signature = param(headers, query, "expo-expect-signature").is_some();
+    // The client names the key its build embeds (codeSigningMetadata.keyid).
+    let expect_signature =
+        param(headers, query, "expo-expect-signature").map(|v| requested_keyid(&v));
     let client_id = param(headers, query, "eas-client-id");
     let embedded_update_id = param(headers, query, "expo-embedded-update-id");
 
@@ -189,11 +191,11 @@ async fn manifest_inner(
     let no_update = || async {
         if protocol == 1 {
             signed_part(
-                app,
+                &plan,
                 protocol,
                 "directive",
                 &plan.no_update,
-                expect_signature,
+                expect_signature.as_deref(),
                 None,
             )
             .await
@@ -216,11 +218,11 @@ async fn manifest_inner(
             track("rollback", "");
             if protocol == 1 {
                 return signed_part(
-                    app,
+                    &plan,
                     protocol,
                     "directive",
                     directive,
-                    expect_signature,
+                    expect_signature.as_deref(),
                     None,
                 )
                 .await;
@@ -264,11 +266,11 @@ async fn manifest_inner(
         _ => None,
     };
     signed_part(
-        app,
+        &plan,
         protocol,
         "manifest",
         body,
-        expect_signature,
+        expect_signature.as_deref(),
         asset_headers,
     )
     .await
@@ -285,17 +287,16 @@ fn no_update_v0() -> Response {
 /// The `multipart/mixed` protocol response: one JSON part (`manifest` or
 /// `directive`, signed when the client asked) plus the `extensions` part.
 async fn signed_part(
-    app: &db::apps::App,
+    plan: &crate::manifest_cache::Plan,
     protocol: u8,
     part_name: &str,
     part: &crate::manifest_cache::SignedBody,
-    expect_signature: bool,
+    keyid: Option<&str>,
     asset_request_headers: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Response> {
-    let signature = if expect_signature {
-        Some(part.signature(app).await?)
-    } else {
-        None
+    let signature = match keyid {
+        Some(k) => Some((k, part.signature(plan, k).await?)),
+        None => None,
     };
 
     let boundary = format!("airlift-{}", uuid::Uuid::new_v4());
@@ -305,9 +306,9 @@ async fn signed_part(
         "Content-Disposition: form-data; name=\"{part_name}\"\r\n"
     ));
     body.push_str("Content-Type: application/json\r\n");
-    if let Some(sig) = signature {
+    if let Some((keyid, sig)) = signature {
         body.push_str(&format!(
-            "expo-signature: sig=\"{sig}\", keyid=\"main\"\r\n"
+            "expo-signature: sig=\"{sig}\", keyid=\"{keyid}\"\r\n"
         ));
     }
     body.push_str("\r\n");
@@ -368,22 +369,39 @@ fn sign_with(key: &SigningKey<RsaSha256>, bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(key.sign(bytes).to_bytes())
 }
 
-/// Parsed signing keys per app, keyed by app id and checked against the PEM
-/// (so a rotated key is picked up). Parsing a PKCS#8 RSA key on every
+/// Parsed signing keys, keyed by (app id, keyid) and checked against the PEM
+/// (so a replaced key is picked up). Parsing a PKCS#8 RSA key on every
 /// manifest request was pure waste on the hot path.
 #[allow(clippy::type_complexity)]
 static SIGNERS: std::sync::LazyLock<
-    dashmap::DashMap<String, (String, std::sync::Arc<SigningKey<RsaSha256>>)>,
+    dashmap::DashMap<(String, String), (String, std::sync::Arc<SigningKey<RsaSha256>>)>,
 > = std::sync::LazyLock::new(dashmap::DashMap::new);
 
-/// Sign `bytes` with the app's key. RSA signing is CPU work, so it (and any
-/// key parse) runs on the blocking pool, not an async worker.
-pub(crate) async fn sign_for_app(app: &db::apps::App, bytes: Vec<u8>) -> Result<String> {
+/// The keyid a client asks for in `expo-expect-signature` (an SFV dictionary
+/// like `sig, keyid="main", alg="rsa-v1_5-sha256"`); `main` if absent.
+fn requested_keyid(expect_signature: &str) -> String {
+    expect_signature
+        .split(',')
+        .filter_map(|kv| kv.trim().strip_prefix("keyid="))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .find(|v| !v.is_empty())
+        .unwrap_or_else(|| "main".to_string())
+}
+
+/// Sign `bytes` with one of an app's keys. RSA signing is CPU work, so it
+/// (and any key parse) runs on the blocking pool, not an async worker.
+pub(crate) async fn sign_with_key(
+    app_id: &str,
+    keyid: &str,
+    private_key_pem: &str,
+    bytes: Vec<u8>,
+) -> Result<String> {
+    let cache_key = (app_id.to_string(), keyid.to_string());
     let cached = SIGNERS
-        .get(&app.id)
-        .filter(|e| e.0 == app.private_key_pem)
+        .get(&cache_key)
+        .filter(|e| e.0 == private_key_pem)
         .map(|e| e.1.clone());
-    let pem = app.private_key_pem.clone();
+    let pem = private_key_pem.to_string();
     let (key, sig) = tokio::task::spawn_blocking(move || -> Result<_> {
         let key = match cached {
             Some(k) => k,
@@ -396,7 +414,7 @@ pub(crate) async fn sign_for_app(app: &db::apps::App, bytes: Vec<u8>) -> Result<
     })
     .await
     .map_err(|e| Error::Other(anyhow::anyhow!("signing task: {e}")))??;
-    SIGNERS.insert(app.id.clone(), (app.private_key_pem.clone(), key));
+    SIGNERS.insert(cache_key, (private_key_pem.to_string(), key));
     Ok(sig)
 }
 

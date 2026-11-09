@@ -49,6 +49,10 @@ pub fn routes() -> Router<AppState> {
             get(apps::get_certificate),
         )
         .route(
+            "/api/v1/orgs/{slug}/apps/{app}/signing-keys",
+            get(apps::list_signing_keys).post(apps::create_signing_key),
+        )
+        .route(
             "/api/v1/orgs/{slug}/apps/{app}/updates",
             get(apps::list_updates),
         )

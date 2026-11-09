@@ -219,18 +219,117 @@ pub async fn get_certificate(
     State(state): State<AppState>,
     caller: ApiUser,
     Path((slug, app_slug)): Path<(String, String)>,
+    Query(q): Query<CertQuery>,
 ) -> Result<Response> {
     let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let keyid = q.keyid.as_deref().unwrap_or("main");
+    let key = db::apps::signing_keys(state.db(), &app)
+        .await?
+        .into_iter()
+        .find(|k| k.keyid == keyid)
+        .ok_or(Error::NotFound)?;
+    let suffix = if keyid == "main" {
+        String::new()
+    } else {
+        format!("-{keyid}")
+    };
     Ok((
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/x-pem-file".to_string()),
             (
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}-certificate.pem\"", app.slug),
+                format!(
+                    "attachment; filename=\"{}-certificate{suffix}.pem\"",
+                    app.slug
+                ),
             ),
         ],
-        app.certificate_pem,
+        key.certificate_pem,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct CertQuery {
+    keyid: Option<String>,
+}
+
+/// The app's code-signing keys (certificates only; private keys never leave
+/// the server).
+pub async fn list_signing_keys(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug)): Path<(String, String)>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let keys = db::apps::signing_keys(state.db(), &app).await?;
+    Ok(json_ok(json!({ "keys": keys })))
+}
+
+#[derive(Deserialize)]
+pub struct NewSigningKeyReq {
+    /// Defaults to `k<YYYYMMDD>`; lowercase letters, digits, hyphens.
+    keyid: Option<String>,
+}
+
+/// Generate an additional signing key (rotation). Existing keys keep
+/// working, so builds in the field still verify; new builds embed the new
+/// certificate and name its keyid in `codeSigningMetadata.keyid`.
+pub async fn create_signing_key(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug)): Path<(String, String)>,
+    Json(req): Json<NewSigningKeyReq>,
+) -> Result<Response> {
+    let (org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let keyid = req.keyid.unwrap_or_else(|| {
+        format!(
+            "k{}",
+            crate::util::now_rfc3339()
+                .chars()
+                .take(10)
+                .filter(|c| c.is_ascii_digit())
+                .collect::<String>()
+        )
+    });
+    if !valid_slug(&keyid) || keyid.len() > 32 {
+        return Err(Error::bad_request(
+            "invalid keyid (lowercase letters, digits, hyphens)",
+        ));
+    }
+    if db::apps::signing_keys(state.db(), &app)
+        .await?
+        .iter()
+        .any(|k| k.keyid == keyid)
+    {
+        return Err(Error::conflict("keyid already exists"));
+    }
+    let cn = format!("airlift: {}/{} ({keyid})", org.slug, app.slug);
+    let identity = tokio::task::spawn_blocking(move || crate::keys::generate(&cn))
+        .await
+        .map_err(|e| Error::Other(anyhow::anyhow!("keygen task: {e}")))??;
+    db::apps::add_signing_key(
+        state.db(),
+        &app.id,
+        &keyid,
+        &identity.private_key_pem,
+        &identity.certificate_pem,
+    )
+    .await?;
+    db::audit::record(
+        state.db(),
+        Some(&caller.user.id),
+        Some(&org.id),
+        "app.signing_key.create",
+        Some(&app.slug),
+        Some(&keyid),
+    )
+    .await
+    .ok();
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "keyid": keyid, "certificate_pem": identity.certificate_pem })),
     )
         .into_response())
 }

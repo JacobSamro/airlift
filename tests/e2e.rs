@@ -156,6 +156,16 @@ async fn manifest_request_with(
 /// Extract and parse the named part; verify its expo-signature against the
 /// app's certificate (exactly what expo-updates does on device).
 async fn verified_part(ctx: &Ctx, resp: reqwest::Response, part: &str) -> Value {
+    verified_part_with_key(ctx, resp, part, "main").await
+}
+
+/// [`verified_part`] against a specific signing key (rotation).
+async fn verified_part_with_key(
+    ctx: &Ctx,
+    resp: reqwest::Response,
+    part: &str,
+    keyid: &str,
+) -> Value {
     assert_eq!(resp.status(), 200);
     let ct = resp
         .headers()
@@ -179,13 +189,14 @@ async fn verified_part(ctx: &Ctx, resp: reqwest::Response, part: &str) -> Value 
     let sig_b64 = headers
         .lines()
         .find(|l| l.to_ascii_lowercase().starts_with("expo-signature:"))
+        .inspect(|l| assert!(l.contains(&format!("keyid=\"{keyid}\"")), "{l}"))
         .and_then(|l| l.split("sig=\"").nth(1))
         .and_then(|s| s.split('"').next())
         .expect("expo-signature header on the signed part");
     let cert_pem = ctx
         .http
         .get(format!(
-            "{}/api/v1/orgs/acme/apps/mobile/certificate",
+            "{}/api/v1/orgs/acme/apps/mobile/certificate?keyid={keyid}",
             ctx.base
         ))
         .send()
@@ -1442,4 +1453,64 @@ async fn bench_request(client: &reqwest::Client, url: &str, n: usize) {
         .unwrap();
     assert_eq!(resp.status(), 200);
     resp.bytes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signing_key_rotation_keeps_old_builds_verifying() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "rot")).await;
+    assert_eq!(status, 201);
+
+    let resp = ctx
+        .http
+        .post(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/signing-keys",
+            ctx.base
+        ))
+        .json(&json!({ "keyid": "k2" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let keys: Value = ctx
+        .http
+        .get(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/signing-keys",
+            ctx.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids: Vec<&str> = keys["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["keyid"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["main", "k2"]);
+
+    let request = |keyid: &'static str| {
+        ctx.http
+            .get(format!("{}/u/{}/manifest", ctx.base, ctx.app_id))
+            .header("expo-platform", "ios")
+            .header("expo-runtime-version", "1.0.0")
+            .header("expo-channel-name", "production")
+            .header("expo-protocol-version", "1")
+            .header(
+                "expo-expect-signature",
+                format!("sig, keyid=\"{keyid}\", alg=\"rsa-v1_5-sha256\""),
+            )
+            .send()
+    };
+    // A new build (k2) and an old build (main) both verify against their own
+    // embedded certificate.
+    let m2 = verified_part_with_key(&ctx, request("k2").await.unwrap(), "manifest", "k2").await;
+    let m1 = verified_part_with_key(&ctx, request("main").await.unwrap(), "manifest", "main").await;
+    assert_eq!(m1["id"], m2["id"]);
+    assert_eq!(request("nope").await.unwrap().status(), 400);
 }
