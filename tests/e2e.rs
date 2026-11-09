@@ -1749,3 +1749,74 @@ async fn token_ip_allowlist() {
         .iter()
         .any(|t| t["allowed_ips"] == "10.0.0.0/8"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_log_export() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "a1")).await;
+    let get = |q: &str| {
+        ctx.http
+            .get(format!("{}/api/v1/orgs/acme/audit/export{q}", ctx.base))
+            .send()
+    };
+
+    let csv = get("").await.unwrap();
+    assert_eq!(csv.status(), 200);
+    assert!(csv.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/csv"));
+    let csv = csv.text().await.unwrap();
+    assert!(
+        csv.starts_with("id,ts,actor_user_id,actor_username"),
+        "{csv}"
+    );
+    assert!(
+        csv.contains("\"app.create\"") && csv.contains("\"update.publish\""),
+        "{csv}"
+    );
+
+    // JSON Lines, filtered by action prefix.
+    let jsonl = get("?format=jsonl&action=update.")
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let rows: Vec<Value> = jsonl
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(!rows.is_empty());
+    assert!(rows
+        .iter()
+        .all(|r| r["action"].as_str().unwrap().starts_with("update.")));
+    assert_eq!(rows[0]["actor_username"], "admin");
+
+    // Cursor paging.
+    let page = get("?format=jsonl&limit=1").await.unwrap();
+    let next = page.headers()["x-audit-next-after-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let first: Value = serde_json::from_str(page.text().await.unwrap().trim()).unwrap();
+    let rest = get(&format!("?format=jsonl&after_id={next}"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let second: Value = serde_json::from_str(rest.lines().next().unwrap()).unwrap();
+    assert!(second["id"].as_i64() > first["id"].as_i64());
+
+    // A publish-capped token can't export.
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/v1/orgs/acme/audit/export", ctx.base))
+        .bearer_auth(&ctx.pat)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}

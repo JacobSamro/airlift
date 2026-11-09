@@ -54,3 +54,57 @@ pub async fn list(db: &Db, org_id: &str, limit: i64) -> Result<Vec<AuditRow>> {
     .await?;
     Ok(rows)
 }
+
+/// An audit row with the actor resolved, for export.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ExportRow {
+    pub id: i64,
+    pub ts: String,
+    pub actor_user_id: Option<String>,
+    pub actor_username: Option<String>,
+    pub actor_email: Option<String>,
+    pub action: String,
+    pub target: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Filters for [`export`]; all optional.
+#[derive(Debug, Default)]
+pub struct ExportFilter<'a> {
+    /// Only entries with id > after_id (incremental sync cursor).
+    pub after_id: Option<i64>,
+    /// ts >= since / ts < until (RFC3339).
+    pub since: Option<&'a str>,
+    pub until: Option<&'a str>,
+    /// Action prefix, e.g. "channel." or "update.publish".
+    pub action_prefix: Option<&'a str>,
+}
+
+/// An org's audit entries, oldest first (so a cursor can resume).
+pub async fn export(
+    db: &Db,
+    org_id: &str,
+    f: &ExportFilter<'_>,
+    limit: i64,
+) -> Result<Vec<ExportRow>> {
+    let rows = sqlx::query_as::<_, ExportRow>(
+        "SELECT l.id, l.ts, l.actor_user_id, u.username AS actor_username,
+                u.email AS actor_email, l.action, l.target, l.detail
+         FROM audit_log l LEFT JOIN users u ON u.id = l.actor_user_id
+         WHERE l.org_id = ?1
+           AND (?2 IS NULL OR l.id > ?2)
+           AND (?3 IS NULL OR l.ts >= ?3)
+           AND (?4 IS NULL OR l.ts < ?4)
+           AND (?5 IS NULL OR substr(l.action, 1, length(?5)) = ?5)
+         ORDER BY l.id LIMIT ?6",
+    )
+    .bind(org_id)
+    .bind(f.after_id)
+    .bind(f.since)
+    .bind(f.until)
+    .bind(f.action_prefix)
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}

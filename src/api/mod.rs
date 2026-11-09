@@ -136,6 +136,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/v1/domains/{domain}/primary", post(set_primary_domain))
         .route("/api/v1/orgs/{slug}/audit", get(list_audit))
+        .route("/api/v1/orgs/{slug}/audit/export", get(export_audit))
         .route(
             "/api/v1/settings/storage",
             get(get_storage_settings).put(update_storage_settings),
@@ -1201,6 +1202,111 @@ async fn list_audit(
     let (org, _) = admin_of(&state, &user.id, &slug).await?;
     let entries = db::audit::list(state.db(), &org.id, 200).await?;
     Ok(json_ok(json!({ "entries": entries })))
+}
+
+#[derive(Deserialize)]
+struct AuditExportQuery {
+    /// csv (default) | jsonl
+    format: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    action: Option<String>,
+    /// Resume after this entry id (from the previous page's
+    /// `x-audit-next-after-id` header) — for incremental SIEM pulls.
+    after_id: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// Export an org's audit log as CSV or JSON Lines, oldest first. Org admins
+/// only; usable with an org-scoped admin-capped token for scheduled pulls.
+/// Pages of up to 50k; `x-audit-next-after-id` continues the export.
+async fn export_audit(
+    State(state): State<AppState>,
+    caller: crate::auth::ApiUser,
+    Path(slug): Path<String>,
+    Query(q): Query<AuditExportQuery>,
+) -> Result<Response> {
+    let (org, _) = admin_of(&state, &caller.user.id, &slug).await?;
+    let scoped_ok = match &caller.scope {
+        crate::models::TokenScope::All => true,
+        crate::models::TokenScope::Org(oid) => *oid == org.id,
+        crate::models::TokenScope::App(_) => false,
+    };
+    if !scoped_ok || caller.cap < crate::models::Permission::Admin {
+        return Err(Error::Forbidden);
+    }
+    let ts = |s: &Option<String>| -> Result<Option<String>> {
+        match s.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => Ok(None),
+            // A bare date means midnight UTC.
+            Some(d) if d.len() == 10 => Ok(Some(format!("{d}T00:00:00.000Z"))),
+            Some(d) => {
+                time::OffsetDateTime::parse(d, &time::format_description::well_known::Rfc3339)
+                    .map(|_| Some(crate::util::normalize_rfc3339(d)))
+                    .map_err(|_| Error::bad_request("since/until: RFC3339 or YYYY-MM-DD"))
+            }
+        }
+    };
+    let (since, until) = (ts(&q.since)?, ts(&q.until)?);
+    let filter = db::audit::ExportFilter {
+        after_id: q.after_id,
+        since: since.as_deref(),
+        until: until.as_deref(),
+        action_prefix: q.action.as_deref().filter(|a| !a.is_empty()),
+    };
+    let limit = q.limit.unwrap_or(50_000).clamp(1, 50_000);
+    let rows = db::audit::export(state.db(), &org.id, &filter, limit).await?;
+
+    let jsonl = matches!(q.format.as_deref(), Some("jsonl" | "ndjson"));
+    let mut out = String::new();
+    if jsonl {
+        for r in &rows {
+            out.push_str(&serde_json::to_string(r).unwrap_or_default());
+            out.push('\n');
+        }
+    } else {
+        // RFC 4180: quote every field, double embedded quotes.
+        let field = |s: Option<&str>| format!("\"{}\"", s.unwrap_or("").replace('"', "\"\""));
+        out.push_str("id,ts,actor_user_id,actor_username,actor_email,action,target,detail\n");
+        for r in &rows {
+            let line = [
+                r.id.to_string(),
+                field(Some(&r.ts)),
+                field(r.actor_user_id.as_deref()),
+                field(r.actor_username.as_deref()),
+                field(r.actor_email.as_deref()),
+                field(Some(&r.action)),
+                field(r.target.as_deref()),
+                field(r.detail.as_deref()),
+            ]
+            .join(",");
+            out.push_str(&line);
+            out.push_str("\r\n");
+        }
+    }
+    let (ctype, ext) = if jsonl {
+        ("application/x-ndjson", "jsonl")
+    } else {
+        ("text/csv; charset=utf-8", "csv")
+    };
+    let mut resp = (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, ctype.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}-audit.{ext}\"", org.slug),
+            ),
+        ],
+        out,
+    )
+        .into_response();
+    if let Some(last) = rows.last().filter(|_| rows.len() as i64 == limit) {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&last.id.to_string()) {
+            resp.headers_mut().insert("x-audit-next-after-id", v);
+        }
+    }
+    Ok(resp)
 }
 
 // ───────────────────── domains / TLS (instance admin) ─────────────────────
