@@ -124,7 +124,7 @@ async fn manifest(
         if protocol == 1 {
             let directive = json!({
                 "type": "rollBackToEmbedded",
-                "parameters": { "commitTime": group.created_at },
+                "parameters": { "commitTime": crate::util::normalize_rfc3339(&group.created_at) },
             });
             return multipart_response(
                 &state,
@@ -181,7 +181,7 @@ async fn manifest(
 
     let manifest = json!({
         "id": update.id,
-        "createdAt": group.created_at,
+        "createdAt": crate::util::normalize_rfc3339(&group.created_at),
         "runtimeVersion": group.runtime_version,
         "launchAsset": {
             "hash": hex_to_b64url(&launch.sha256),
