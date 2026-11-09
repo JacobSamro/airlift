@@ -225,7 +225,7 @@ async fn setup(State(state): State<AppState>, Json(req): Json<SetupReq>) -> Resu
     if req.password.len() < 8 {
         return Err(Error::bad_request("password must be at least 8 characters"));
     }
-    let hash = password::hash_password(&req.password)?;
+    let hash = password::hash_password_blocking(req.password.clone()).await?;
     // Atomic guarded insert: only the first of any racing first-run requests
     // creates the super-admin; the rest see `None` and get a conflict, so
     // concurrent setup can't mint multiple instance admins.
@@ -268,8 +268,10 @@ struct LoginReq {
 async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> Result<Response> {
     let user = db::users::find_by_login(state.db(), &req.login)
         .await?
-        .filter(|u| password::verify_password(&req.password, &u.password_hash))
         .ok_or(Error::Unauthorized)?;
+    if !password::verify_password_blocking(req.password.clone(), user.password_hash.clone()).await {
+        return Err(Error::Unauthorized);
+    }
 
     let sid = db::users::create_session(
         state.db(),
@@ -443,7 +445,7 @@ async fn provision_oauth_user(db: &db::Db, email: &str, name: &str) -> Result<cr
     let base = sanitize_username(if name.trim().is_empty() { email } else { name });
     let username = unique_username(db, &base).await?;
     let random = format!("{}{}", crate::util::random_id(), crate::util::random_id());
-    let hash = password::hash_password(&random)?;
+    let hash = password::hash_password_blocking(random).await?;
     db::users::create(db, email, &username, &hash, false).await
 }
 
@@ -505,7 +507,7 @@ async fn create_user(
     if req.password.len() < 8 {
         return Err(Error::bad_request("password must be at least 8 characters"));
     }
-    let hash = password::hash_password(&req.password)?;
+    let hash = password::hash_password_blocking(req.password.clone()).await?;
     let created =
         db::users::create(state.db(), &req.email, &req.username, &hash, req.is_admin).await?;
     Ok(json_ok(json!({ "user": created })))

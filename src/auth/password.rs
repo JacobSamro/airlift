@@ -25,3 +25,18 @@ pub fn verify_password(password: &str, phc: &str) -> bool {
         Err(_) => false,
     }
 }
+
+/// [`hash_password`] on the blocking pool: Argon2id is deliberately slow
+/// (tens of ms of CPU) and must not stall an async worker.
+pub async fn hash_password_blocking(password: String) -> Result<String> {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| Error::Other(anyhow::anyhow!("password hash task: {e}")))?
+}
+
+/// [`verify_password`] on the blocking pool (see [`hash_password_blocking`]).
+pub async fn verify_password_blocking(password: String, phc: String) -> bool {
+    tokio::task::spawn_blocking(move || verify_password(&password, &phc))
+        .await
+        .unwrap_or(false)
+}
