@@ -145,7 +145,9 @@ function patchAppJson(appJsonPath: string, updateUrl: string): void {
     enabled: desired.enabled,
     codeSigningCertificate: desired.codeSigningCertificate,
     codeSigningMetadata: desired.codeSigningMetadata,
-    requestHeaders: { ...existingHeaders, ...desired.requestHeaders },
+    // Defaults first: an existing expo-channel-name (e.g. "staging") is the
+    // user's choice and must survive a re-run of init.
+    requestHeaders: { ...desired.requestHeaders, ...existingHeaders },
   };
 
   if (expo.runtimeVersion === undefined) {
