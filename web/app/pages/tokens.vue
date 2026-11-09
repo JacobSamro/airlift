@@ -70,12 +70,15 @@ async function load() {
 onMounted(load);
 
 async function create() {
-  const body: Record<string, string> = { name: newName.value, permission: scopePerm.value };
-  if (scopeType.value === "org" && scopeOrg.value) body.org = scopeOrg.value;
-  if (scopeType.value === "app" && scopeOrg.value && scopeApp.value.trim()) {
-    body.org = scopeOrg.value;
-    body.app = scopeApp.value.trim();
-  }
+  // Always send the scope kind explicitly: the server rejects a narrow scope
+  // with missing org/app instead of minting an all-scope token.
+  const body: Record<string, string> = {
+    name: newName.value,
+    permission: scopePerm.value,
+    scope: scopeType.value,
+  };
+  if (scopeType.value !== "all" && scopeOrg.value) body.org = scopeOrg.value;
+  if (scopeType.value === "app" && scopeApp.value.trim()) body.app = scopeApp.value.trim();
   const res = await api.post<{ token: string }>("/api/v1/tokens", body);
   created.value = res.token;
   newName.value = "";

@@ -768,6 +768,11 @@ struct CreateTokenReq {
     /// Optional permission cap: "read", "publish", or "admin" (default).
     #[serde(default)]
     permission: Option<String>,
+    /// Optional explicit scope kind ("all" | "org" | "app"). When given, the
+    /// matching `org`/`app` fields are required — a narrow scope request
+    /// must never silently become an all-scope token.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 async fn create_token(
@@ -777,6 +782,22 @@ async fn create_token(
 ) -> Result<Response> {
     // Resolve the requested scope. The user must belong to any org they scope
     // to; the resulting token is still bounded by their RBAC at use time.
+    // Anything ambiguous is a 400, never a silent widening to "all".
+    let has_org = req.org.as_deref().is_some_and(|s| !s.is_empty());
+    let has_app = req.app.as_deref().is_some_and(|s| !s.is_empty());
+    match (req.scope.as_deref(), has_org, has_app) {
+        (_, false, true) => return Err(Error::bad_request("app scope requires org")),
+        (Some("org"), false, _) => return Err(Error::bad_request("org scope requires org")),
+        (Some("app"), _, false) => {
+            return Err(Error::bad_request("app scope requires org and app"))
+        }
+        (Some("all"), true, _) => {
+            return Err(Error::bad_request("all scope can't name an org or app"))
+        }
+        (Some("org"), _, true) => return Err(Error::bad_request("org scope can't name an app")),
+        (None | Some("all" | "org" | "app"), _, _) => {}
+        (Some(_), _, _) => return Err(Error::bad_request("invalid scope (all|org|app)")),
+    }
     let (kind, org_id, app_id) = match (req.org.as_deref(), req.app.as_deref()) {
         (Some(slug), Some(app_slug)) => {
             let (org, _) = member_of(&state, &user.id, slug).await?;

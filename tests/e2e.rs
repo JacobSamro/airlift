@@ -755,6 +755,22 @@ async fn publish_requires_a_capable_token() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 
+    // A narrow scope request missing its org must be refused, not widened.
+    for body in [
+        json!({ "name": "x", "app": "mobile" }),
+        json!({ "name": "x", "scope": "org" }),
+        json!({ "name": "x", "scope": "app", "org": "acme" }),
+    ] {
+        let resp = ctx
+            .http
+            .post(format!("{}/api/v1/tokens", ctx.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{body}");
+    }
+
     // No token at all → 401.
     let form = reqwest::multipart::Form::new()
         .text("branch", "production")
