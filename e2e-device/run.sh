@@ -179,12 +179,25 @@ flow() { # flow-file KEY=VAL...
   case " $* " in *" EXTRA="*) ;; *) env_args+=(-e EXTRA=none) ;; esac
   log "[$STEP] maestro $file $*"
   if [ "${E2E_DRY_RUN:-}" = 1 ]; then return 0; fi
-  if ! maestro ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} test --debug-output "$WORK/maestro/$STEP-${file%.yaml}" \
-    ${env_args[@]+"${env_args[@]}"} "$HERE/flows/$file"; then
-    device_diagnostics
-    die "step $STEP ($file $*) failed"
+  local out="$WORK/maestro/$STEP-${file%.yaml}.out"
+  if run_maestro "$out" "$file" ${env_args[@]+"${env_args[@]}"}; then return 0; fi
+  # Maestro's iOS XCTest driver sometimes misses its startup window on a
+  # loaded runner; that fails before any flow command ran, so retry once.
+  if grep -q "driver not ready in time" "$out"; then
+    log "[$STEP] Maestro driver startup timed out; retrying once"
+    if run_maestro "$out.retry" "$file" ${env_args[@]+"${env_args[@]}"}; then return 0; fi
   fi
+  device_diagnostics
+  die "step $STEP ($file $*) failed"
 }
+run_maestro() { # out-file flow-file maestro-args...
+  local out="$1" file="$2"; shift 2
+  maestro ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} test --debug-output "$WORK/maestro/$STEP-${file%.yaml}" \
+    "$@" "$HERE/flows/$file" 2>&1 | tee "$out"
+  return "${PIPESTATUS[0]}"
+}
+# Give Maestro's iOS driver longer than its default to come up on CI.
+export MAESTRO_DRIVER_STARTUP_TIMEOUT="${MAESTRO_DRIVER_STARTUP_TIMEOUT:-180000}"
 # On a failed step: print what the app shows (status carries the
 # expo-updates error) and save the device log next to the server logs.
 device_diagnostics() {

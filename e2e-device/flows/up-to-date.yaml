@@ -5,6 +5,8 @@ appId: dev.airlift.e2e
 ---
 - launchApp:
     stopApp: false
+# Strictly idle (fresh after a reload): a stale "up-to-date" from an earlier
+# check would otherwise satisfy the assertion below without a new check.
 - extendedWaitUntil:
     visible:
       id: status

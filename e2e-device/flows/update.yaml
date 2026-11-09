@@ -5,11 +5,12 @@ appId: dev.airlift.e2e
 ---
 - launchApp:
     stopApp: false
-# Don't tap before the JS tree is up and idle.
+# Don't tap before the JS tree is up and not busy (the app keeps running
+# between steps, so a previous check's result may still be showing).
 - extendedWaitUntil:
     visible:
       id: status
-      text: "status:idle"
+      text: "status:(idle|up-to-date.*)"
     timeout: 60000
 - tapOn:
     id: check
