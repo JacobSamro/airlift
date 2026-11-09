@@ -495,6 +495,7 @@ const gitRef = (u: UpdateGroup) =>
                       >
                         <UiBadge variant="primary">{{ r.rollout_percent }}%</UiBadge>
                       </button>
+                      <HealthBadge :health="r.health" />
                       <span class="font-mono">{{ shortId(r.group_id) }}</span>
                       · {{ timeAgo(r.released_at) }}
                     </span>
@@ -599,6 +600,7 @@ const gitRef = (u: UpdateGroup) =>
                     <UiBadge v-if="u.group_type === 'rollback_to_embedded'" variant="outline">
                       <span class="text-destructive">rollback</span>
                     </UiBadge>
+                    <HealthBadge v-else :health="u.health" />
                   </div>
                 </td>
                 <td class="px-3 py-3">

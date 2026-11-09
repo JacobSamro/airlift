@@ -148,10 +148,14 @@ pub async fn get_app(
             _ => serde_json::Value::Null,
         };
         let releases = db::updates::releases_for_channel(state.db(), &ch.id).await?;
+        // Health badge next to each release (most useful mid-rollout).
+        let ids: Vec<String> = releases.iter().map(|r| r.group_id.clone()).collect();
+        let health = db::clients::group_health(state.db(), &app.id, &ids).await?;
         let releases: Vec<_> = releases
             .into_iter()
             .map(|r| {
                 json!({
+                    "health": health.get(&r.group_id),
                     "runtime_version": r.runtime_version,
                     "group_id": r.group_id,
                     "released_at": r.released_at,
@@ -268,12 +272,20 @@ pub async fn list_updates(
         limit,
     )
     .await?;
-    let groups_json: Vec<_> = rows.iter().map(group_json).collect();
+    let ids: Vec<String> = rows.iter().map(|r| r.group.id.clone()).collect();
+    let health = db::clients::group_health(state.db(), &app.id, &ids).await?;
+    let groups_json: Vec<_> = rows
+        .iter()
+        .map(|r| group_json(r, health.get(&r.group.id)))
+        .collect();
     Ok(json_ok(json!({ "updates": groups_json })))
 }
 
 /// Dashboard/CLI-facing JSON for one update group.
-fn group_json(row: &db::updates::GroupListing) -> serde_json::Value {
+fn group_json(
+    row: &db::updates::GroupListing,
+    health: Option<&db::clients::Health>,
+) -> serde_json::Value {
     let g = &row.group;
     let platforms: Vec<&str> = row
         .platforms
@@ -290,6 +302,7 @@ fn group_json(row: &db::updates::GroupListing) -> serde_json::Value {
         "group_type": g.group_type,
         "platforms": platforms,
         "created_at": g.created_at,
+        "health": health,
     })
 }
 

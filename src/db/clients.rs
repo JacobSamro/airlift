@@ -164,3 +164,71 @@ pub async fn record_outcome(
     .await?;
     Ok(())
 }
+
+/// Launch outcomes of one update group across its platforms.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct Health {
+    /// Devices that tried an update of the group (launched or failed it).
+    pub devices: i64,
+    /// Devices that reported it in Expo-Recent-Failed-Update-IDs.
+    pub failed: i64,
+    /// failed / devices (0 when no devices yet).
+    pub failure_rate: f64,
+    /// insufficient (< MIN_DEVICES) | healthy (< 1%) | degraded (< 5%) | unhealthy
+    pub status: &'static str,
+}
+
+/// Below this many devices a failure rate is too noisy to judge.
+pub const MIN_DEVICES: i64 = 20;
+
+impl Health {
+    fn from_counts(devices: i64, failed: i64) -> Self {
+        let failure_rate = if devices > 0 {
+            failed as f64 / devices as f64
+        } else {
+            0.0
+        };
+        let status = if devices < MIN_DEVICES {
+            "insufficient"
+        } else if failure_rate < 0.01 {
+            "healthy"
+        } else if failure_rate < 0.05 {
+            "degraded"
+        } else {
+            "unhealthy"
+        };
+        Self {
+            devices,
+            failed,
+            failure_rate,
+            status,
+        }
+    }
+}
+
+/// Health of each given group (groups with no reports get zero counts).
+pub async fn group_health(
+    db: &Db,
+    app_id: &str,
+    group_ids: &[String],
+) -> Result<std::collections::HashMap<String, Health>> {
+    let ids = serde_json::to_string(group_ids).unwrap_or_else(|_| "[]".into());
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT u.group_id, COUNT(*), COALESCE(SUM(cu.failed), 0)
+         FROM client_updates cu JOIN updates u ON u.id = cu.update_id
+         WHERE cu.app_id = ?1 AND u.group_id IN (SELECT value FROM json_each(?2))
+         GROUP BY u.group_id",
+    )
+    .bind(app_id)
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+    let mut out: std::collections::HashMap<String, Health> = group_ids
+        .iter()
+        .map(|g| (g.clone(), Health::from_counts(0, 0)))
+        .collect();
+    for (g, devices, failed) in rows {
+        out.insert(g, Health::from_counts(devices, failed));
+    }
+    Ok(out)
+}

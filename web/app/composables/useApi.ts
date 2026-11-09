@@ -60,6 +60,7 @@ export interface ChannelRelease {
   rollout_percent: number | null;
   /** What devices outside the rollout get. */
   previous_group_id: string | null;
+  health: Health | null;
 }
 export interface Channel {
   id: string;
@@ -81,6 +82,14 @@ export interface UpdateGroup {
   group_type: "normal" | "rollback_to_embedded";
   platforms: string[];
   created_at: string;
+  health: Health | null;
+}
+/** Launch outcomes of an update group (from device check-ins). */
+export interface Health {
+  devices: number;
+  failed: number;
+  failure_rate: number;
+  status: "insufficient" | "healthy" | "degraded" | "unhealthy";
 }
 export interface Token {
   id: string;

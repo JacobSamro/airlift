@@ -1124,6 +1124,40 @@ async fn crashed_updates_are_never_reserved() {
     let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", Some(&v1_id)).await;
     let m = verified_part(&ctx, resp, "manifest").await;
     assert_eq!(m["id"].as_str().unwrap(), v2_id);
+
+    // Per-update health: three devices launched v2, one crashed on it.
+    for d in ["ok-1", "ok-2", "ok-3"] {
+        manifest_request_with(
+            &ctx,
+            "production",
+            "1.0.0",
+            "ios",
+            "1",
+            &[("EAS-Client-ID", d), ("expo-current-update-id", &v2_id)],
+        )
+        .await;
+    }
+    let mut health = Value::Null;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let v: Value = ctx
+            .http
+            .get(format!("{}/api/v1/orgs/acme/apps/mobile/updates", ctx.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        health = v["updates"][0]["health"].clone();
+        if health["devices"] == 4 {
+            break;
+        }
+    }
+    assert_eq!(health["devices"], 4, "{health}");
+    assert_eq!(health["failed"], 1);
+    assert_eq!(health["failure_rate"], 0.25);
+    assert_eq!(health["status"], "insufficient"); // < 20 devices
 }
 
 /// Parse a protocol response without signature checks: (part → json).
