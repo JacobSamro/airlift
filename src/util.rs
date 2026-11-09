@@ -36,6 +36,22 @@ pub fn normalize_rfc3339(s: &str) -> String {
         .unwrap_or_else(|_| s.to_string())
 }
 
+/// UTC calendar day (`YYYY-MM-DD`) `days` before today — the lower bound for
+/// analytics range queries.
+pub fn utc_day_offset(days: i64) -> String {
+    let d = (OffsetDateTime::now_utc() - time::Duration::days(days)).date();
+    format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+}
+
+/// Generate a random url-safe id (used for session ids and similar).
+pub fn random_id() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut bytes = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -52,20 +68,4 @@ mod tests {
             "2026-07-08T12:00:00.000Z"
         );
     }
-}
-
-/// UTC calendar day (`YYYY-MM-DD`) `days` before today — the lower bound for
-/// analytics range queries.
-pub fn utc_day_offset(days: i64) -> String {
-    let d = (OffsetDateTime::now_utc() - time::Duration::days(days)).date();
-    format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
-}
-
-/// Generate a random url-safe id (used for session ids and similar).
-pub fn random_id() -> String {
-    use base64::Engine;
-    use rand::RngCore;
-    let mut bytes = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
