@@ -142,11 +142,13 @@ pub async fn get_app(
         let releases = db::updates::releases_for_channel(state.db(), &ch.id).await?;
         let releases: Vec<_> = releases
             .into_iter()
-            .map(|(runtime_version, group_id, released_at)| {
+            .map(|r| {
                 json!({
-                    "runtime_version": runtime_version,
-                    "group_id": group_id,
-                    "released_at": released_at,
+                    "runtime_version": r.runtime_version,
+                    "group_id": r.group_id,
+                    "released_at": r.released_at,
+                    "rollout_percent": r.rollout_percent,
+                    "previous_group_id": r.previous_group_id,
                 })
             })
             .collect();
@@ -394,7 +396,11 @@ pub async fn update_channel(
         .filter(|b| ch.branch_id.as_deref() != Some(*b))
     {
         let runtimes = db::updates::branch_runtime_versions(state.db(), new_branch).await?;
-        for (rv, _, _) in db::updates::releases_for_channel(state.db(), &ch.id).await? {
+        for rv in db::updates::releases_for_channel(state.db(), &ch.id)
+            .await?
+            .into_iter()
+            .map(|r| r.runtime_version)
+        {
             if !runtimes.contains(&rv) {
                 db::updates::delete_channel_release(state.db(), &ch.id, &rv).await?;
             }
@@ -479,6 +485,112 @@ pub async fn promote(
     ))
 }
 
+// ───────────────────── progressive rollouts ─────────────────────
+
+#[derive(Deserialize)]
+pub struct StartRolloutReq {
+    group_id: String,
+    /// Share of the fleet (0 < p < 100) that gets the group; 100 = promote.
+    percent: f64,
+}
+
+/// Release a group to only part of the fleet. Devices outside keep the last
+/// full release; grow it with PATCH, revert it with rollback.
+pub async fn start_rollout(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug, channel)): Path<(String, String, String)>,
+    Json(req): Json<StartRolloutReq>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let pct = valid_percent(req.percent)?;
+    let ch = db::updates::find_channel(state.db(), &app.id, &channel)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let group = db::updates::find_group(state.db(), &req.group_id)
+        .await?
+        .ok_or_else(|| Error::bad_request("no such update group"))?;
+    let branches = db::updates::list_branches(state.db(), &app.id).await?;
+    if !branches.iter().any(|b| b.id == group.branch_id) {
+        return Err(Error::bad_request("update group belongs to another app"));
+    }
+    let group = db::updates::fresh_for_channel(state.db(), &ch.id, &group).await?;
+    let mut tx = state.db().begin_with("BEGIN IMMEDIATE").await?;
+    if pct >= 100.0 {
+        db::updates::set_channel_release_tx(&mut tx, &ch.id, &group.runtime_version, &group.id)
+            .await?;
+    } else {
+        db::updates::start_rollout_tx(&mut tx, &ch.id, &group.runtime_version, &group.id, pct)
+            .await?;
+    }
+    tx.commit().await?;
+    db::audit::record(
+        state.db(),
+        Some(&caller.user.id),
+        Some(&app.org_id),
+        "channel.rollout",
+        Some(&format!("{}/{}", app.slug, ch.name)),
+        Some(&format!("{} {pct}%", group.id)),
+    )
+    .await
+    .ok();
+    Ok(json_ok(json!({
+        "ok": true,
+        "group_id": group.id,
+        "runtime_version": group.runtime_version,
+        "percent": pct,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SetRolloutReq {
+    runtime_version: String,
+    /// New share; 100 completes the rollout (full release).
+    percent: f64,
+}
+
+/// Grow (or shrink) a running rollout. Devices already inside stay inside
+/// when it grows; shrinking only stops offering it to devices that haven't
+/// taken it yet (to pull it from devices, roll back).
+pub async fn set_rollout(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug, channel)): Path<(String, String, String)>,
+    Json(req): Json<SetRolloutReq>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let pct = valid_percent(req.percent)?;
+    let ch = db::updates::find_channel(state.db(), &app.id, &channel)
+        .await?
+        .ok_or(Error::NotFound)?;
+    if !db::updates::set_rollout_percent(state.db(), &ch.id, &req.runtime_version, pct).await? {
+        return Err(Error::bad_request(
+            "no rollout is running on this channel for that runtime version",
+        ));
+    }
+    db::audit::record(
+        state.db(),
+        Some(&caller.user.id),
+        Some(&app.org_id),
+        "channel.rollout",
+        Some(&format!("{}/{}", app.slug, ch.name)),
+        Some(&format!("{} {pct}%", req.runtime_version)),
+    )
+    .await
+    .ok();
+    Ok(json_ok(
+        json!({ "ok": true, "percent": pct, "complete": pct >= 100.0 }),
+    ))
+}
+
+fn valid_percent(p: f64) -> Result<f64> {
+    if p.is_finite() && p > 0.0 && p <= 100.0 {
+        Ok(p)
+    } else {
+        Err(Error::bad_request("percent must be in (0, 100]"))
+    }
+}
+
 #[derive(Deserialize)]
 pub struct RollbackReq {
     runtime_version: String,
@@ -559,7 +671,7 @@ pub async fn rollback_to_embedded(
         "",
     )
     .await?;
-    let released = super::publish::advance_channels(&mut tx, &app, &branch, &group).await?;
+    let released = super::publish::advance_channels(&mut tx, &app, &branch, &group, None).await?;
     tx.commit().await?;
     db::audit::record(
         state.db(),

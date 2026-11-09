@@ -518,31 +518,56 @@ pub async fn launch_asset(db: &Db, update_id: &str) -> Result<Option<Asset>> {
     Ok(a)
 }
 
-/// Whether an asset (by hex sha256) is referenced by any update of this app —
-/// as a regular asset or a launch bundle. Guards the public asset endpoint so
-/// org-level dedup can't leak another app's files.
-pub async fn asset_in_app(db: &Db, app_id: &str, sha256: &str) -> Result<bool> {
-    let (found,): (i64,) = sqlx::query_as(
-        "SELECT EXISTS(
-            SELECT 1 FROM assets a
+/// Who may download an asset of this app (the public asset endpoint).
+#[derive(Debug, Default)]
+pub struct AssetAccess {
+    /// Some update of this app references the asset at all.
+    pub in_app: bool,
+    /// Some referencing group is NOT confined to a running rollout (released
+    /// fully somewhere, an older/pending group…): anyone may fetch it.
+    pub open: bool,
+    /// Otherwise: the (salt, percent) of each rollout that serves it — the
+    /// device must be inside one of them.
+    pub rollouts: Vec<(String, f64)>,
+}
+
+pub async fn asset_access(db: &Db, app_id: &str, sha256: &str) -> Result<AssetAccess> {
+    let rows: Vec<(String, Option<String>, Option<f64>)> = sqlx::query_as(
+        "WITH refs AS (
+            SELECT u.group_id AS gid FROM assets a
             JOIN update_assets ua ON ua.asset_id = a.id
             JOIN updates u ON u.id = ua.update_id
             JOIN update_groups g ON g.id = u.group_id
             JOIN branches b ON b.id = g.branch_id
             WHERE b.app_id = ?1 AND a.sha256 = ?2
-        ) OR EXISTS(
-            SELECT 1 FROM assets a
+            UNION
+            SELECT u.group_id FROM assets a
             JOIN updates u ON u.launch_asset_id = a.id
             JOIN update_groups g ON g.id = u.group_id
             JOIN branches b ON b.id = g.branch_id
             WHERE b.app_id = ?1 AND a.sha256 = ?2
-        )",
+         )
+         SELECT r.gid, cr.rollout_salt, cr.rollout_percent FROM refs r
+         LEFT JOIN channel_releases cr
+           ON cr.group_id = r.gid AND cr.rollout_percent IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM channel_releases f
+                          WHERE f.group_id = r.gid AND f.rollout_percent IS NULL)",
     )
     .bind(app_id)
     .bind(sha256)
-    .fetch_one(db)
+    .fetch_all(db)
     .await?;
-    Ok(found != 0)
+    let mut access = AssetAccess {
+        in_app: !rows.is_empty(),
+        ..Default::default()
+    };
+    for (_, salt, pct) in rows {
+        match (salt, pct) {
+            (Some(s), Some(p)) => access.rollouts.push((s, p)),
+            _ => access.open = true,
+        }
+    }
+    Ok(access)
 }
 
 // ───────────────────────── channel releases ─────────────────────────
@@ -572,7 +597,8 @@ pub async fn set_channel_release_tx(
         "INSERT INTO channel_releases (channel_id, runtime_version, group_id, released_at)
          VALUES (?, ?, ?, ?)
          ON CONFLICT(channel_id, runtime_version) DO UPDATE
-           SET group_id = excluded.group_id, released_at = excluded.released_at",
+           SET group_id = excluded.group_id, released_at = excluded.released_at,
+               rollout_percent = NULL, rollout_salt = NULL, previous_group_id = NULL",
     )
     .bind(channel_id)
     .bind(runtime_version)
@@ -739,7 +765,8 @@ pub async fn apply_rollback(
         "INSERT INTO channel_releases (channel_id, runtime_version, group_id, released_at)
          VALUES (?, ?, ?, ?)
          ON CONFLICT(channel_id, runtime_version) DO UPDATE
-           SET group_id = excluded.group_id, released_at = excluded.released_at",
+           SET group_id = excluded.group_id, released_at = excluded.released_at,
+               rollout_percent = NULL, rollout_salt = NULL, previous_group_id = NULL",
     )
     .bind(channel_id)
     .bind(runtime_version)
@@ -769,6 +796,119 @@ pub async fn channel_release(
     Ok(g)
 }
 
+/// A channel's release pointer for one runtime, with its rollout state.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Release {
+    pub channel_id: String,
+    pub runtime_version: String,
+    pub group_id: String,
+    pub released_at: String,
+    /// `None` = fully released.
+    pub rollout_percent: Option<f64>,
+    #[serde(skip_serializing)]
+    pub rollout_salt: Option<String>,
+    /// What devices outside the rollout get (the last full release).
+    pub previous_group_id: Option<String>,
+}
+
+pub async fn release<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
+    channel_id: &str,
+    runtime_version: &str,
+) -> Result<Option<Release>> {
+    let r = sqlx::query_as::<_, Release>(
+        "SELECT * FROM channel_releases WHERE channel_id = ? AND runtime_version = ?",
+    )
+    .bind(channel_id)
+    .bind(runtime_version)
+    .fetch_optional(db)
+    .await?;
+    Ok(r)
+}
+
+/// Start a progressive rollout of `group_id` at `percent` (0 < p < 100) on a
+/// channel. Devices outside keep the last FULL release: if a rollout is
+/// already running, its fallback carries over (rollouts don't stack). A fresh
+/// salt re-buckets the fleet for this rollout.
+pub async fn start_rollout_tx(
+    tx: &mut sqlx::SqliteConnection,
+    channel_id: &str,
+    runtime_version: &str,
+    group_id: &str,
+    percent: f64,
+) -> Result<()> {
+    let previous = match release(&mut *tx, channel_id, runtime_version).await? {
+        Some(r) if r.rollout_percent.is_some() => r.previous_group_id,
+        Some(r) => Some(r.group_id),
+        None => None,
+    };
+    let now = now_rfc3339();
+    sqlx::query(
+        "INSERT INTO channel_releases
+            (channel_id, runtime_version, group_id, released_at,
+             rollout_percent, rollout_salt, previous_group_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(channel_id, runtime_version) DO UPDATE SET
+           group_id = excluded.group_id, released_at = excluded.released_at,
+           rollout_percent = excluded.rollout_percent,
+           rollout_salt = excluded.rollout_salt,
+           previous_group_id = excluded.previous_group_id",
+    )
+    .bind(channel_id)
+    .bind(runtime_version)
+    .bind(group_id)
+    .bind(&now)
+    .bind(percent)
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(previous)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO channel_release_history (channel_id, runtime_version, group_id, released_at)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(channel_id)
+    .bind(runtime_version)
+    .bind(group_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Move a running rollout to `percent`; 100 (or more) completes it (a full
+/// release). The salt is kept, so devices already in stay in when growing.
+/// Returns false if there's no rollout running for that runtime.
+pub async fn set_rollout_percent(
+    db: &Db,
+    channel_id: &str,
+    runtime_version: &str,
+    percent: f64,
+) -> Result<bool> {
+    let res = if percent >= 100.0 {
+        sqlx::query(
+            "UPDATE channel_releases
+             SET rollout_percent = NULL, rollout_salt = NULL, previous_group_id = NULL
+             WHERE channel_id = ? AND runtime_version = ? AND rollout_percent IS NOT NULL",
+        )
+        .bind(channel_id)
+        .bind(runtime_version)
+        .execute(db)
+        .await?
+    } else {
+        sqlx::query(
+            "UPDATE channel_releases SET rollout_percent = ?
+             WHERE channel_id = ? AND runtime_version = ? AND rollout_percent IS NOT NULL",
+        )
+        .bind(percent)
+        .bind(channel_id)
+        .bind(runtime_version)
+        .execute(db)
+        .await?
+    };
+    Ok(res.rows_affected() == 1)
+}
+
 /// Runtime versions that have at least one group on a branch.
 pub async fn branch_runtime_versions(db: &Db, branch_id: &str) -> Result<Vec<String>> {
     let rows: Vec<(String,)> =
@@ -793,12 +933,9 @@ pub async fn delete_channel_release(
 }
 
 /// All release pointers for a channel (dashboard view).
-pub async fn releases_for_channel(
-    db: &Db,
-    channel_id: &str,
-) -> Result<Vec<(String, String, String)>> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT runtime_version, group_id, released_at FROM channel_releases
+pub async fn releases_for_channel(db: &Db, channel_id: &str) -> Result<Vec<Release>> {
+    let rows = sqlx::query_as::<_, Release>(
+        "SELECT * FROM channel_releases
          WHERE channel_id = ? ORDER BY runtime_version DESC",
     )
     .bind(channel_id)

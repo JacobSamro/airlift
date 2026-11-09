@@ -12,6 +12,7 @@ mod models;
 mod patches;
 mod protocol;
 mod rate_limit;
+mod rollout;
 mod server;
 mod state;
 mod storage;

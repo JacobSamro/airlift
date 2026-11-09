@@ -211,22 +211,53 @@ async function submitRollback() {
 
 const promoteUpdate = ref<UpdateGroup | null>(null);
 const promoteChannelName = ref("");
+// Below 100 the promote becomes a progressive rollout.
+const promotePercent = ref(100);
 
 function openPromote(u: UpdateGroup) {
   promoteUpdate.value = u;
   promoteChannelName.value = channels.value[0]?.name ?? "";
+  promotePercent.value = 100;
 }
 
 async function submitPromote() {
   const u = promoteUpdate.value;
   if (!u || !promoteChannelName.value) return;
   error.value = "";
+  const base = `/api/v1/orgs/${slug.value}/apps/${appSlug.value}/channels/${promoteChannelName.value}`;
   try {
-    await api.post(
-      `/api/v1/orgs/${slug.value}/apps/${appSlug.value}/channels/${promoteChannelName.value}/promote`,
-      { group_id: u.id },
-    );
+    if (promotePercent.value < 100) {
+      await api.post(`${base}/rollout`, { group_id: u.id, percent: Number(promotePercent.value) });
+    } else {
+      await api.post(`${base}/promote`, { group_id: u.id });
+    }
     promoteUpdate.value = null;
+    await load();
+  } catch (e) {
+    error.value = apiErrorMessage(e);
+  }
+}
+
+// ── Rollouts ───────────────────────────────────────────────────────────────
+
+const rolloutTarget = ref<{ ch: Channel; r: ChannelRelease } | null>(null);
+const rolloutPercent = ref(0);
+
+function openRollout(ch: Channel, r: ChannelRelease) {
+  rolloutTarget.value = { ch, r };
+  rolloutPercent.value = r.rollout_percent ?? 100;
+}
+
+async function submitRollout(percent: number) {
+  const t = rolloutTarget.value;
+  if (!t) return;
+  error.value = "";
+  try {
+    await api.patch(
+      `/api/v1/orgs/${slug.value}/apps/${appSlug.value}/channels/${t.ch.name}/rollout`,
+      { runtime_version: t.r.runtime_version, percent: Number(percent) },
+    );
+    rolloutTarget.value = null;
     await load();
   } catch (e) {
     error.value = apiErrorMessage(e);
@@ -405,7 +436,15 @@ const gitRef = (u: UpdateGroup) =>
                     class="flex items-center justify-between py-1.5"
                   >
                     <span class="font-mono text-xs">{{ r.runtime_version }}</span>
-                    <span class="text-xs text-muted-foreground">
+                    <span class="flex items-center gap-2 text-xs text-muted-foreground">
+                      <button
+                        v-if="r.rollout_percent !== null"
+                        :title="`Rolling out to ${r.rollout_percent}% of devices — adjust`"
+                        :data-testid="`rollout-${ch.name}-${r.runtime_version}`"
+                        @click="openRollout(ch, r)"
+                      >
+                        <UiBadge variant="primary">{{ r.rollout_percent }}%</UiBadge>
+                      </button>
                       <span class="font-mono">{{ shortId(r.group_id) }}</span>
                       · {{ timeAgo(r.released_at) }}
                     </span>
@@ -640,9 +679,64 @@ const gitRef = (u: UpdateGroup) =>
               </SelectContent>
             </Select>
           </div>
+          <div class="flex flex-col gap-1.5">
+            <label class="text-sm font-medium">Rollout</label>
+            <div class="flex items-center gap-3">
+              <input
+                v-model.number="promotePercent"
+                type="range"
+                min="1"
+                max="100"
+                class="flex-1"
+                data-testid="promote-percent"
+              />
+              <span class="w-12 text-right font-mono text-sm">{{ promotePercent }}%</span>
+            </div>
+            <p class="text-xs text-muted-foreground">
+              {{
+                promotePercent < 100
+                  ? "Only this share of devices gets it; the rest keep the current release. Devices stay in as you grow it."
+                  : "Every device on the channel gets it."
+              }}
+            </p>
+          </div>
           <div class="flex justify-end gap-2">
             <UiButton variant="outline" type="button" @click="promoteUpdate = null">Cancel</UiButton>
-            <UiButton type="submit" :disabled="!promoteChannelName">Promote</UiButton>
+            <UiButton type="submit" :disabled="!promoteChannelName">
+              {{ promotePercent < 100 ? `Roll out to ${promotePercent}%` : "Promote" }}
+            </UiButton>
+          </div>
+        </form>
+      </UiModal>
+
+      <!-- Adjust rollout dialog -->
+      <UiModal
+        :open="!!rolloutTarget"
+        :title="`Rollout on ${rolloutTarget?.ch.name ?? ''}`"
+        @close="rolloutTarget = null"
+      >
+        <form class="flex flex-col gap-4" @submit.prevent="submitRollout(rolloutPercent)">
+          <p class="text-sm text-muted-foreground">
+            Update <span class="font-mono text-xs">{{ rolloutTarget ? shortId(rolloutTarget.r.group_id) : "" }}</span>
+            (runtime <span class="font-mono text-xs">{{ rolloutTarget?.r.runtime_version }}</span>) is
+            reaching {{ rolloutTarget?.r.rollout_percent }}% of devices. Devices already in stay in when
+            you grow it; to pull it from devices, roll the channel back.
+          </p>
+          <div class="flex items-center gap-3">
+            <input
+              v-model.number="rolloutPercent"
+              type="range"
+              min="1"
+              max="100"
+              class="flex-1"
+              data-testid="rollout-percent"
+            />
+            <span class="w-12 text-right font-mono text-sm">{{ rolloutPercent }}%</span>
+          </div>
+          <div class="flex justify-end gap-2">
+            <UiButton variant="outline" type="button" @click="rolloutTarget = null">Cancel</UiButton>
+            <UiButton variant="outline" type="button" @click="submitRollout(100)">Complete (100%)</UiButton>
+            <UiButton type="submit">Set {{ rolloutPercent }}%</UiButton>
           </div>
         </form>
       </UiModal>

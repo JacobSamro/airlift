@@ -74,6 +74,10 @@ pub fn routes() -> Router<AppState> {
             post(apps::rollback),
         )
         .route(
+            "/api/v1/orgs/{slug}/apps/{app}/channels/{channel}/rollout",
+            post(apps::start_rollout).patch(apps::set_rollout),
+        )
+        .route(
             "/api/v1/orgs/{slug}/apps/{app}/branches/{branch}/rollback-to-embedded",
             post(apps::rollback_to_embedded),
         )

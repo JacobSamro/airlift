@@ -1120,3 +1120,133 @@ async fn crashed_updates_are_never_reserved() {
     let m = verified_part(&ctx, resp, "manifest").await;
     assert_eq!(m["id"].as_str().unwrap(), v2_id);
 }
+
+/// Parse a protocol response without signature checks: (part → json).
+async fn parts_of(resp: reqwest::Response) -> std::collections::HashMap<String, Value> {
+    assert_eq!(resp.status(), 200);
+    let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
+    let body = resp.text().await.unwrap();
+    parse_multipart(&ct, &body)
+        .into_iter()
+        .map(|(k, (_, v))| (k, serde_json::from_str(&v).unwrap()))
+        .collect()
+}
+
+/// The update id a device is offered, or None for a directive.
+async fn offered(ctx: &Ctx, client_id: Option<&str>) -> Option<String> {
+    let mut extra = vec![];
+    if let Some(c) = client_id {
+        extra.push(("EAS-Client-ID", c));
+    }
+    let resp = manifest_request_with(ctx, "production", "1.0.0", "ios", "1", &extra).await;
+    parts_of(resp)
+        .await
+        .get("manifest")
+        .map(|m| m["id"].as_str().unwrap().to_string())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn progressive_rollout_buckets_devices_stably() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "base")).await;
+    assert_eq!(status, 201);
+    let v1 = offered(&ctx, Some("probe")).await.unwrap();
+
+    // v2 published as a 30% rollout.
+    let form = reqwest::multipart::Form::new()
+        .text("branch", "production")
+        .text("runtime_version", "1.0.0")
+        .text("rollout_percent", "30")
+        .part(
+            "archive",
+            reqwest::multipart::Part::bytes(export_zip(&["ios"], "canary")).file_name("d.zip"),
+        );
+    let resp = ctx
+        .http
+        .post(format!("{}/api/v1/apps/{}/updates", ctx.base, ctx.app_id))
+        .bearer_auth(&ctx.pat)
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["channels"][0]["status"], "rolling_out");
+
+    let devices: Vec<String> = (0..200).map(|i| format!("dev-{i}")).collect();
+    let mut inside = Vec::new();
+    let mut v2 = None;
+    for d in &devices {
+        let got = offered(&ctx, Some(d)).await.unwrap();
+        if got != v1 {
+            v2 = Some(got);
+            inside.push(d.clone());
+        }
+    }
+    let v2 = v2.expect("some devices are in the rollout");
+    assert!(
+        (30..90).contains(&inside.len()),
+        "~30% of 200: {}",
+        inside.len()
+    );
+    // No client id → never inside.
+    assert_eq!(offered(&ctx, None).await.unwrap(), v1);
+
+    // Asset path applies the same check; rollout manifests pin the client id.
+    let resp = manifest_request_with(
+        &ctx,
+        "production",
+        "1.0.0",
+        "ios",
+        "1",
+        &[("EAS-Client-ID", &inside[0])],
+    )
+    .await;
+    let parts = parts_of(resp).await;
+    let url = parts["manifest"]["launchAsset"]["url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let key = parts["manifest"]["launchAsset"]["key"].as_str().unwrap();
+    assert_eq!(
+        parts["extensions"]["assetRequestHeaders"][key]["EAS-Client-ID"],
+        inside[0].as_str()
+    );
+    let outside = devices.iter().find(|d| !inside.contains(d)).unwrap();
+    let fetch = |cid: Option<String>| {
+        let mut r = ctx.http.get(&url);
+        if let Some(c) = cid {
+            r = r.header("EAS-Client-ID", c);
+        }
+        r.send()
+    };
+    assert_eq!(fetch(Some(inside[0].clone())).await.unwrap().status(), 307);
+    assert_eq!(fetch(Some(outside.clone())).await.unwrap().status(), 404);
+    assert_eq!(fetch(None).await.unwrap().status(), 404);
+
+    // Growing to 60%: everyone inside at 30% stays inside.
+    let set = |pct: f64| {
+        ctx.http
+            .patch(format!(
+                "{}/api/v1/orgs/acme/apps/mobile/channels/production/rollout",
+                ctx.base
+            ))
+            .json(&json!({ "runtime_version": "1.0.0", "percent": pct }))
+            .send()
+    };
+    assert_eq!(set(60.0).await.unwrap().status(), 200);
+    for d in &inside {
+        assert_eq!(offered(&ctx, Some(d)).await.unwrap(), v2);
+    }
+
+    // 100% completes it: everyone (even without a client id) gets v2, and
+    // the asset is open again.
+    assert_eq!(set(100.0).await.unwrap().status(), 200);
+    assert_eq!(offered(&ctx, None).await.unwrap(), v2);
+    assert_eq!(fetch(None).await.unwrap().status(), 307);
+    // Nothing left to adjust.
+    assert_eq!(set(50.0).await.unwrap().status(), 400);
+}

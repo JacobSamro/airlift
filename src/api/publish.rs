@@ -8,6 +8,7 @@
 //!   message           optional release message
 //!   git_branch / git_commit   optional VCS info
 //!   expo_config       optional JSON: resolved Expo config (manifest `extra.expoClient`)
+//!   rollout_percent   optional (0, 100]: auto-release channels start a rollout
 //!   archive           the zipped export directory (must contain metadata.json)
 
 use std::collections::BTreeMap;
@@ -69,6 +70,7 @@ pub async fn publish(
     let mut git_branch = None;
     let mut git_commit = None;
     let mut expo_config = None;
+    let mut rollout_percent: Option<String> = None;
     let mut archive: Option<Vec<u8>> = None;
 
     while let Some(field) = multipart
@@ -84,6 +86,7 @@ pub async fn publish(
             "git_branch" => git_branch = Some(text(field).await?),
             "git_commit" => git_commit = Some(text(field).await?),
             "expo_config" => expo_config = Some(text(field).await?),
+            "rollout_percent" => rollout_percent = Some(text(field).await?),
             "archive" => {
                 archive = Some(
                     field
@@ -100,6 +103,19 @@ pub async fn publish(
     let branch_name = required(branch_name, "branch")?;
     let runtime_version = required(runtime_version, "runtime_version")?;
     let archive = archive.ok_or_else(|| Error::bad_request("missing archive file field"))?;
+    // Optional staged release: auto-release channels start a rollout at this
+    // share instead of releasing to everyone (100 or absent = full release).
+    let rollout = match rollout_percent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => None,
+        Some(s) => match s.parse::<f64>() {
+            Ok(p) if p.is_finite() && p > 0.0 && p <= 100.0 => (p < 100.0).then_some(p),
+            _ => return Err(Error::bad_request("rollout_percent must be in (0, 100]")),
+        },
+    };
     if let Some(cfg) = &expo_config {
         serde_json::from_str::<serde_json::Value>(cfg)
             .map_err(|_| Error::bad_request("expo_config is not valid JSON"))?;
@@ -262,7 +278,7 @@ pub async fn publish(
         }
     }
 
-    let released = advance_channels(&mut tx, &app, &branch, &group).await?;
+    let released = advance_channels(&mut tx, &app, &branch, &group, rollout).await?;
     tx.commit().await?;
 
     metrics::counter!("airlift_publish_total", "app" => app.slug.clone()).increment(1);
@@ -301,6 +317,7 @@ pub(crate) async fn advance_channels(
     app: &db::apps::App,
     branch: &db::updates::Branch,
     group: &db::updates::UpdateGroup,
+    rollout: Option<f64>,
 ) -> Result<Vec<serde_json::Value>> {
     let mut channels = db::updates::channels_for_branch(&mut *tx, &branch.id).await?;
     if channels.is_empty()
@@ -317,6 +334,12 @@ pub(crate) async fn advance_channels(
     let mut released = Vec::new();
     for ch in channels {
         if ch.auto_release {
+            if let Some(p) = rollout {
+                db::updates::start_rollout_tx(tx, &ch.id, &group.runtime_version, &group.id, p)
+                    .await?;
+                released.push(json!({ "channel": ch.name, "status": "rolling_out", "percent": p }));
+                continue;
+            }
             db::updates::set_channel_release_tx(tx, &ch.id, &group.runtime_version, &group.id)
                 .await?;
             released.push(json!({ "channel": ch.name, "status": "released" }));

@@ -56,6 +56,10 @@ export interface ChannelRelease {
   runtime_version: string;
   group_id: string;
   released_at: string;
+  /** Share of the fleet served `group_id` (null = fully released). */
+  rollout_percent: number | null;
+  /** What devices outside the rollout get. */
+  previous_group_id: string | null;
 }
 export interface Channel {
   id: string;

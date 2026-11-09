@@ -177,7 +177,11 @@ async fn manifest_inner(
 
     // The release pointer is the source of truth, whether or not the channel
     // tracks a branch (a branchless channel is served purely by promote).
-    let group = db::updates::channel_release(state.db(), &channel.id, &runtime_version).await?;
+    // During a progressive rollout only devices bucketed inside get the new
+    // group; everyone else (incl. devices without a client id) keeps the last
+    // full release.
+    let (group, in_rollout) =
+        resolve_release(state, &channel.id, &runtime_version, client_id.as_deref()).await?;
 
     let Some(group) = group else {
         track("no_update", "");
@@ -273,15 +277,53 @@ async fn manifest_inner(
         "extra": { "expoClient": extra_expo_client },
     });
 
-    multipart_response(
+    // Rollout manifests pin EAS-Client-ID on every asset download, so the
+    // asset endpoint can re-check rollout membership even if the client
+    // wouldn't otherwise send the header there.
+    let mut asset_headers = serde_json::Map::new();
+    if let (true, Some(cid)) = (in_rollout, client_id.as_deref()) {
+        let pin = json!({ "EAS-Client-ID": cid });
+        asset_headers.insert(format!("bundle-{}", launch.sha256), pin.clone());
+        for a in &assets {
+            asset_headers.insert(a.key.clone(), pin.clone());
+        }
+    }
+
+    multipart_response_with(
         state,
         &app,
         protocol,
         "manifest",
         &manifest,
         expect_signature,
+        asset_headers,
     )
     .await
+}
+
+/// The group this device should get on a channel/runtime, and whether it got
+/// it as part of a running rollout.
+async fn resolve_release(
+    state: &AppState,
+    channel_id: &str,
+    runtime_version: &str,
+    client_id: Option<&str>,
+) -> Result<(Option<db::updates::UpdateGroup>, bool)> {
+    let Some(r) = db::updates::release(state.db(), channel_id, runtime_version).await? else {
+        return Ok((None, false));
+    };
+    let (group_id, in_rollout) = match (r.rollout_percent, r.rollout_salt.as_deref()) {
+        (Some(p), Some(salt)) if crate::rollout::included(client_id, salt, p) => {
+            (Some(r.group_id), true)
+        }
+        (Some(_), _) => (r.previous_group_id, false),
+        (None, _) => (Some(r.group_id), false),
+    };
+    let group = match group_id {
+        Some(id) => db::updates::find_group(state.db(), &id).await?,
+        None => None,
+    };
+    Ok((group, in_rollout))
 }
 
 /// Protocol 1 answers "you're current" with a directive; protocol 0 has no
@@ -326,6 +368,30 @@ async fn multipart_response(
     part_json: &serde_json::Value,
     expect_signature: bool,
 ) -> Result<Response> {
+    multipart_response_with(
+        state,
+        app,
+        protocol,
+        part_name,
+        part_json,
+        expect_signature,
+        serde_json::Map::new(),
+    )
+    .await
+}
+
+/// [`multipart_response`] with per-asset request headers in the extensions
+/// part (`assetRequestHeaders`: asset key → headers the client must send
+/// when downloading that asset).
+async fn multipart_response_with(
+    state: &AppState,
+    app: &db::apps::App,
+    protocol: u8,
+    part_name: &str,
+    part_json: &serde_json::Value,
+    expect_signature: bool,
+    asset_request_headers: serde_json::Map<String, serde_json::Value>,
+) -> Result<Response> {
     let _ = state;
     let body_json = serde_json::to_string(part_json)
         .map_err(|e| Error::Other(anyhow::anyhow!("manifest serialize: {e}")))?;
@@ -352,9 +418,10 @@ async fn multipart_response(
     body.push_str(&body_json);
     body.push_str("\r\n");
 
-    // Extensions part: reserved for asset request headers (e.g. auth for a
-    // private CDN). Ours are public presigned redirects, so it's empty.
-    let extensions = json!({ "assetRequestHeaders": {} }).to_string();
+    // Extensions part: asset request headers. Normally empty (assets are
+    // public presigned redirects); a rollout manifest pins EAS-Client-ID on
+    // every asset so the asset endpoint can apply the same rollout check.
+    let extensions = json!({ "assetRequestHeaders": asset_request_headers }).to_string();
     body.push_str(&format!("--{boundary}\r\n"));
     body.push_str("Content-Disposition: form-data; name=\"extensions\"\r\n");
     body.push_str("Content-Type: application/json\r\n\r\n");
@@ -460,8 +527,21 @@ async fn asset(
     // Strict per-app confinement: this endpoint is public, so an asset is only
     // served if one of THIS app's updates references it — org-level dedup must
     // not become a cross-app oracle.
-    if !db::updates::asset_in_app(state.db(), &app.id, &sha256).await? {
+    // Same rollout check as the manifest: an asset only reachable through a
+    // running rollout is served only to devices bucketed inside it.
+    let access = db::updates::asset_access(state.db(), &app.id, &sha256).await?;
+    if !access.in_app {
         return Err(Error::NotFound);
+    }
+    if !access.open {
+        let client_id = headers.get("eas-client-id").and_then(|v| v.to_str().ok());
+        if !access
+            .rollouts
+            .iter()
+            .any(|(salt, pct)| crate::rollout::included(client_id, salt, *pct))
+        {
+            return Err(Error::NotFound);
+        }
     }
     // SDK 55+ clients may ask for a bsdiff patch of the launch bundle
     // (A-IM: bsdiff). When one is ready this answers 226 with the patch;
