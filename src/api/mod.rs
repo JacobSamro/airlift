@@ -418,8 +418,10 @@ async fn google_callback_inner(
     }
 
     // Link to an existing account by email, or auto-provision when an allowed
-    // domain is configured (otherwise unknown emails are rejected).
-    let user = match db::users::find_by_login(state.db(), &email).await? {
+    // domain is configured (otherwise unknown emails are rejected). Match the
+    // email column ONLY: a user whose *username* equals this address must not
+    // be handed to whoever controls the Google account.
+    let user = match db::users::find_by_email(state.db(), &email).await? {
         Some(u) => u,
         None if cfg.allowed_domain.is_empty() => return Err(Error::Forbidden),
         None => provision_oauth_user(state.db(), &email, &info.name).await?,

@@ -32,6 +32,16 @@ pub async fn find_by_id(db: &Db, id: &str) -> Result<Option<User>> {
     Ok(u)
 }
 
+/// Look up by email only, case-insensitively. Identity linking (OAuth) must
+/// use this: usernames are free-form and could be set to someone's email.
+pub async fn find_by_email(db: &Db, email: &str) -> Result<Option<User>> {
+    let u = sqlx::query_as::<_, User>("SELECT * FROM users WHERE lower(email) = lower(?)")
+        .bind(email)
+        .fetch_optional(db)
+        .await?;
+    Ok(u)
+}
+
 /// Look up by email or username, case-insensitively.
 pub async fn find_by_login(db: &Db, login: &str) -> Result<Option<User>> {
     let u = sqlx::query_as::<_, User>(
