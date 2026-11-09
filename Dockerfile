@@ -1,6 +1,6 @@
 # Multi-stage build: Nuxt UI -> static Rust binary -> minimal runtime.
 
-FROM oven/bun:1 AS web
+FROM oven/bun:1.4.4 AS web
 WORKDIR /web
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile

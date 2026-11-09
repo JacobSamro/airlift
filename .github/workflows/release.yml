@@ -27,7 +27,7 @@ jobs:
       # rust-embed bundles web/.output/public at compile time — build it first.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.4.4"
       - name: Build web UI
         working-directory: web
         run: |
@@ -67,7 +67,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.4.4"
       - name: Build web UI
         working-directory: web
         run: |
