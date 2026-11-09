@@ -7,6 +7,17 @@ name: Device e2e
 on:
   push:
     branches: [main, master]
+    # Same list as pull_request below: only run when the OTA path changed.
+    paths:
+      - "src/**"
+      - "migrations/**"
+      - "cli/**"
+      - "e2e-device/**"
+      - "tests/common/s3_stub.rs"
+      - "examples/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/device-e2e.yml"
   pull_request:
     paths:
       - "src/**"

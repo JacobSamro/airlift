@@ -31,7 +31,7 @@ S3_PORT="${S3_PORT:-47301}"
 SERVER="http://127.0.0.1:$PORT"
 ORG=acme
 APP_SLUG=e2e
-RUNTIME=1.0.0
+RUNTIME="$(jq -r .expo.runtimeVersion "$APP/app.json")"
 CHANNEL=production
 CLI="$ROOT/cli/dist/index.js"
 AIRLIFT_BIN="${AIRLIFT_BIN:-$ROOT/target/release/airlift}"
@@ -40,13 +40,24 @@ S3_STUB_BIN="${S3_STUB_BIN:-$ROOT/target/release/examples/s3_stub}"
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 
+[[ "$RUNTIME" =~ ^[0-9A-Za-z._-]+$ ]] || die "app.json expo.runtimeVersion must be a plain string (got '$RUNTIME')"
+
+# Only ever wipe the default dir or one this script created (tagged .e2e-work).
+if [ "$WORK" != "$HERE/.work" ] && [ -e "$WORK" ] && [ ! -e "$WORK/.e2e-work" ] \
+  && [ -n "$(ls -A "$WORK" 2>/dev/null)" ]; then
+  die "refusing to wipe $WORK: not an e2e work dir (no .e2e-work marker)"
+fi
 rm -rf "$WORK"
 mkdir -p "$WORK/maestro"
+touch "$WORK/.e2e-work"
 
 # The run edits app.json (airlift init) and marker.js (per publish); put
-# both back however we exit.
+# both back however we exit. The marker snapshot is normalized to
+# "embedded" so a run killed mid-way (trap skipped) can't poison the next
+# build's embedded bundle.
 cp "$APP/app.json" "$WORK/app.json.orig"
-cp "$APP/marker.js" "$WORK/marker.js.orig"
+sed "s/MARKER = '.*'/MARKER = 'embedded'/" "$APP/marker.js" >"$WORK/marker.js.orig"
+cp "$WORK/marker.js.orig" "$APP/marker.js"
 PIDS=()
 cleanup() {
   local code=$?
@@ -56,6 +67,8 @@ cleanup() {
   if [ $code -ne 0 ]; then
     echo "---- airlift.log (tail) ----"
     tail -n 80 "$WORK/airlift.log" 2>/dev/null || true
+    echo "---- s3.log (tail) ----"
+    tail -n 40 "$WORK/s3.log" 2>/dev/null || true
   fi
   exit $code
 }
@@ -71,6 +84,11 @@ log "build publish CLI"
 
 # ───────────── start S3 stub + airlift ─────────────
 log "start s3 stub on :$S3_PORT and airlift on :$PORT"
+for p in "$PORT" "$S3_PORT"; do
+  if curl -s -o /dev/null "http://127.0.0.1:$p/"; then
+    die "port $p is already in use (leftover run?); stop it or set AIRLIFT_PORT/S3_PORT"
+  fi
+done
 "$S3_STUB_BIN" "127.0.0.1:$S3_PORT" >"$WORK/s3.log" 2>&1 &
 PIDS+=($!)
 RUST_LOG="${RUST_LOG:-info}" \
@@ -86,8 +104,10 @@ RUST_LOG="${RUST_LOG:-info}" \
   AIRLIFT_STORAGE__SECRET_ACCESS_KEY=e2e \
   AIRLIFT_STORAGE__FORCE_PATH_STYLE=true \
   "$AIRLIFT_BIN" --config "$WORK/none.toml" serve >"$WORK/airlift.log" 2>&1 &
-PIDS+=($!)
+AIRLIFT_PID=$!
+PIDS+=("$AIRLIFT_PID")
 for _ in $(seq 1 100); do
+  kill -0 "$AIRLIFT_PID" 2>/dev/null || die "airlift exited during startup (see $WORK/airlift.log)"
   curl -fsS "$SERVER/healthz" >/dev/null 2>&1 && break
   sleep 0.2
 done
@@ -123,23 +143,27 @@ elif [ "$PLATFORM" = android ]; then
   log "prebuild + assembleRelease (abi $ABI)"
   (cd "$APP" && CI=1 npx expo prebuild --platform android --clean --no-install)
   (cd "$APP/android" && ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures="$ABI")
-  adb install -r "$APP/android/app/build/outputs/apk/release/app-release.apk"
+  # Fresh install: a previous run's downloaded updates must not leak in.
+  adb uninstall dev.airlift.e2e >/dev/null 2>&1 || true
+  adb install "$APP/android/app/build/outputs/apk/release/app-release.apk"
   # The emulator's 127.0.0.1 is itself; tunnel the server + stub ports.
   adb reverse "tcp:$PORT" "tcp:$PORT"
   adb reverse "tcp:$S3_PORT" "tcp:$S3_PORT"
 else
-  UDID="${SIM_UDID:-booted}"
+  # Pin one concrete simulator so build, install and Maestro all agree.
+  UDID="${SIM_UDID:-$(xcrun simctl list devices booted -j | jq -r '[.devices[][] | select(.state == "Booted")][0].udid // empty')}"
+  [ -n "$UDID" ] || die "no booted iOS simulator (boot one or set SIM_UDID)"
   log "prebuild + xcodebuild Release (simulator $UDID)"
   (cd "$APP" && CI=1 npx expo prebuild --platform ios --clean)
-  WS="$(ls -d "$APP"/ios/*.xcworkspace | head -n1)"
+  WS="$(find "$APP/ios" -maxdepth 1 -name '*.xcworkspace' | head -n1)"
   SCHEME="$(basename "$WS" .xcworkspace)"
-  DEST='generic/platform=iOS Simulator'
-  if [ "$UDID" != booted ]; then DEST="id=$UDID"; fi
   xcodebuild -workspace "$WS" -scheme "$SCHEME" -configuration Release \
-    -sdk iphonesimulator -destination "$DEST" ONLY_ACTIVE_ARCH=YES \
+    -sdk iphonesimulator -destination "id=$UDID" ONLY_ACTIVE_ARCH=YES \
     -derivedDataPath "$WORK/xcode" CODE_SIGNING_ALLOWED=NO build -quiet
+  # Fresh install: a previous run's downloaded updates must not leak in.
+  xcrun simctl uninstall "$UDID" dev.airlift.e2e >/dev/null 2>&1 || true
   xcrun simctl install "$UDID" "$WORK/xcode/Build/Products/Release-iphonesimulator/$SCHEME.app"
-  if [ "$UDID" != booted ]; then DEVICE_ARGS=(--device "$UDID"); fi
+  DEVICE_ARGS=(--device "$UDID")
 fi
 
 # ───────────── the scenario ─────────────
@@ -155,7 +179,7 @@ flow() { # flow-file KEY=VAL...
     ${env_args[@]+"${env_args[@]}"} "$HERE/flows/$file"
 }
 publish() { # marker
-  printf "// Rewritten by e2e-device/run.sh before each publish; the build embeds \"embedded\".\nexport const MARKER = '%s';\n" "$1" >"$APP/marker.js"
+  sed "s/MARKER = '.*'/MARKER = '$1'/" "$WORK/marker.js.orig" >"$APP/marker.js"
   log "publish $1"
   cli publish --branch "$CHANNEL" --platform "$PLATFORM" --message "$1"
 }
