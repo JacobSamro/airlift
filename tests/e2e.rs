@@ -1820,3 +1820,53 @@ async fn audit_log_export() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_geo_from_cdn_headers() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn_with(&stub, &[("AIRLIFT_SERVER__TRUST_PROXY", "true")]).await;
+    let ctx = setup_instance(&server).await;
+    publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "geo")).await;
+    for (d, country, city) in [
+        ("g1", "DE", "Berlin"),
+        ("g2", "DE", "Berlin"),
+        ("g3", "IN", "Chennai"),
+    ] {
+        manifest_request_with(
+            &ctx,
+            "production",
+            "1.0.0",
+            "ios",
+            "1",
+            &[
+                ("EAS-Client-ID", d),
+                ("cf-ipcountry", country),
+                ("cf-ipcity", city),
+            ],
+        )
+        .await;
+    }
+    let mut geo = Value::Null;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        geo = ctx
+            .http
+            .get(format!("{}/api/v1/orgs/acme/apps/mobile/geo", ctx.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if geo["countries"].as_array().is_some_and(|c| c.len() == 2) {
+            break;
+        }
+    }
+    assert_eq!(
+        geo["countries"][0],
+        json!({ "country": "DE", "city": null, "devices": 2 }),
+        "{geo}"
+    );
+    assert_eq!(geo["countries"][1]["country"], "IN");
+    assert_eq!(geo["cities"][0]["city"], "Berlin");
+}

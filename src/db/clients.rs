@@ -16,15 +16,18 @@ pub async fn upsert_client(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO clients (app_id, client_id, platform, runtime_version, channel,
-                              embedded_update_id, current_update_id, first_seen, last_seen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              embedded_update_id, current_update_id, first_seen, last_seen,
+                              country, city)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(app_id, client_id) DO UPDATE SET
            platform = excluded.platform,
            runtime_version = excluded.runtime_version,
            channel = excluded.channel,
            embedded_update_id = excluded.embedded_update_id,
            current_update_id = excluded.current_update_id,
-           last_seen = excluded.last_seen",
+           last_seen = excluded.last_seen,
+           country = COALESCE(excluded.country, country),
+           city = CASE WHEN excluded.country IS NULL THEN city ELSE excluded.city END",
     )
     .bind(app_id)
     .bind(client_id)
@@ -35,6 +38,8 @@ pub async fn upsert_client(
     .bind(&c.current_update_id)
     .bind(now_rfc3339())
     .bind(&c.last_seen)
+    .bind(&c.country)
+    .bind(&c.city)
     .execute(db)
     .await?;
     Ok(())
@@ -74,13 +79,15 @@ pub struct ClientRow {
     pub current_update_id: Option<String>,
     pub first_seen: String,
     pub last_seen: String,
+    pub country: Option<String>,
+    pub city: Option<String>,
 }
 
 /// Devices seen most recently, newest first.
 pub async fn list_clients(db: &Db, app_id: &str, limit: i64) -> Result<Vec<ClientRow>> {
     let rows = sqlx::query_as::<_, ClientRow>(
         "SELECT client_id, platform, runtime_version, channel, embedded_update_id,
-                current_update_id, first_seen, last_seen
+                current_update_id, first_seen, last_seen, country, city
          FROM clients WHERE app_id = ? ORDER BY last_seen DESC LIMIT ?",
     )
     .bind(app_id)
@@ -231,4 +238,35 @@ pub async fn group_health(
         out.insert(g, Health::from_counts(devices, failed));
     }
     Ok(out)
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct GeoCount {
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub devices: i64,
+}
+
+/// Recently-active devices (14 days) per country, and the top cities.
+pub async fn geo(db: &Db, app_id: &str) -> Result<(Vec<GeoCount>, Vec<GeoCount>)> {
+    let cutoff = rfc3339_in(-14 * 86400);
+    let countries = sqlx::query_as::<_, GeoCount>(
+        "SELECT country, NULL AS city, COUNT(*) AS devices
+         FROM clients WHERE app_id = ? AND last_seen > ?
+         GROUP BY country ORDER BY devices DESC",
+    )
+    .bind(app_id)
+    .bind(&cutoff)
+    .fetch_all(db)
+    .await?;
+    let cities = sqlx::query_as::<_, GeoCount>(
+        "SELECT country, city, COUNT(*) AS devices
+         FROM clients WHERE app_id = ? AND last_seen > ? AND city IS NOT NULL
+         GROUP BY country, city ORDER BY devices DESC LIMIT 50",
+    )
+    .bind(app_id)
+    .bind(&cutoff)
+    .fetch_all(db)
+    .await?;
+    Ok((countries, cities))
 }

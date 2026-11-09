@@ -32,6 +32,9 @@ pub struct Config {
     /// Client-monitoring / usage analytics settings.
     #[serde(default)]
     pub analytics: AnalyticsConfig,
+    /// Device geo, error reports, OTLP logs/metrics.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
     /// bsdiff incremental-patch settings.
     #[serde(default)]
     pub patches: PatchesConfig,
@@ -76,6 +79,26 @@ impl Default for AnalyticsConfig {
         Self {
             enabled: true,
             rollup_secs: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObservabilityConfig {
+    /// Path to a MaxMind GeoLite2/GeoIP2 City (or Country) .mmdb file for
+    /// device geo. Empty = use CDN geo headers only (CF-IPCountry etc., when
+    /// server.trust_proxy is on). Only country and city are stored, never IPs.
+    pub geoip_mmdb: String,
+    /// Days to keep raw error events, log records and metric points.
+    pub retention_days: i64,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            geoip_mmdb: String::new(),
+            retention_days: 14,
         }
     }
 }
@@ -248,6 +271,7 @@ impl Default for Config {
             tls: TlsConfig::default(),
             gc: GcConfig::default(),
             analytics: AnalyticsConfig::default(),
+            observability: ObservabilityConfig::default(),
             patches: PatchesConfig::default(),
         }
     }

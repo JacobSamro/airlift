@@ -1078,3 +1078,14 @@ pub async fn set_branch_protection(
         json!({ "ok": true, "branch": branch.name, "protected": req.protected }),
     ))
 }
+
+/// Device geo for the map: active devices (14 days) per country + top cities.
+pub async fn app_geo(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug)): Path<(String, String)>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Read).await?;
+    let (countries, cities) = db::clients::geo(state.db(), &app.id).await?;
+    Ok(json_ok(json!({ "countries": countries, "cities": cities })))
+}

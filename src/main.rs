@@ -7,6 +7,7 @@ mod config;
 mod db;
 mod error;
 mod gc;
+mod geo;
 mod keys;
 mod manifest_cache;
 mod models;
@@ -153,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
             let analytics_enabled = config.analytics.enabled;
             let rollup_secs = config.analytics.rollup_secs;
             let gc_interval = config.gc.interval_secs;
+            geo::init(&config.observability.geoip_mmdb);
             let state = state::AppState::new(config, pool, storage, secret_key);
             // Derive the effective public URL from config or the primary domain
             // before serving, so manifest asset URLs are correct on the first

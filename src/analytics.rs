@@ -16,6 +16,9 @@ pub struct ClientCheckin {
     pub embedded_update_id: Option<String>,
     pub current_update_id: Option<String>,
     pub last_seen: String,
+    /// Country (ISO 3166-1 alpha-2) and city, when known.
+    pub country: Option<String>,
+    pub city: Option<String>,
 }
 
 /// Key for the daily rollup: (app_id, day, platform, served update id or "").
@@ -73,6 +76,7 @@ impl UsageCollector {
         current_update_id: Option<&str>,
         served_update_id: &str,
         failed_update_ids: &[String],
+        location: crate::geo::Location,
     ) {
         if !self.enabled {
             return;
@@ -114,6 +118,8 @@ impl UsageCollector {
                     embedded_update_id: embedded_update_id.map(String::from),
                     current_update_id: current_update_id.map(String::from),
                     last_seen: now_rfc3339(),
+                    country: location.country,
+                    city: location.city,
                 },
             );
         }

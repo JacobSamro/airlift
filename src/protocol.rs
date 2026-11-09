@@ -94,11 +94,12 @@ fn blocked_updates(
 async fn manifest(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
+    crate::geo::ClientAddr(ip): crate::geo::ClientAddr,
     headers: HeaderMap,
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response> {
     let (failed, blocked) = blocked_updates(&headers, &query);
-    let mut resp = manifest_inner(&state, &app_id, &headers, &query, &failed, &blocked).await?;
+    let mut resp = manifest_inner(&state, &app_id, &headers, &query, &failed, &blocked, ip).await?;
     // Always (re)state the full blocked set: the client replaces its stored
     // server-defined headers with whatever the latest response carries.
     let value = if blocked.is_empty() {
@@ -122,6 +123,7 @@ async fn manifest_inner(
     query: &std::collections::HashMap<String, String>,
     failed: &[String],
     blocked: &[String],
+    ip: Option<std::net::IpAddr>,
 ) -> Result<Response> {
     let platform = param(headers, query, "expo-platform")
         .ok_or_else(|| Error::bad_request("missing expo-platform"))?;
@@ -162,6 +164,8 @@ async fn manifest_inner(
     .ok_or(Error::NotFound)?;
     let app = &plan.app;
 
+    // Where the device is (country/city only; the IP is never stored).
+    let location = crate::geo::locate(ip, headers, state.config().server.trust_proxy);
     // Off-hot-path accounting: bump the Prometheus counter and record the
     // device check-in (flushed to SQLite by the background loop).
     let track = |result: &'static str, served_update_id: &str| {
@@ -182,6 +186,7 @@ async fn manifest_inner(
             current_update_id.as_deref(),
             served_update_id,
             failed,
+            location.clone(),
         );
     };
 

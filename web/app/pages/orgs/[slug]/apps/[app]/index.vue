@@ -375,14 +375,9 @@ const gitRef = (u: UpdateGroup) =>
   <div>
     <div v-if="loading" class="py-8 text-center text-sm text-muted-foreground">Loading…</div>
     <template v-else-if="app">
+      <AppTabs :slug="slug" :app="appSlug" />
       <!-- Header -->
       <div class="mb-6">
-        <NuxtLink
-          :to="`/orgs/${slug}`"
-          class="mb-2 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-        >
-          ← {{ slug }}
-        </NuxtLink>
         <div class="flex items-start justify-between gap-4">
           <div>
             <div class="flex items-center gap-3">

@@ -44,3 +44,9 @@ grace_secs = 3600                    # never collect assets younger than this (p
 [analytics]
 enabled = true                       # device check-ins + adoption stats (in-memory + daily rollups)
 rollup_secs = 60                     # how often to flush check-in counters to SQLite
+
+[observability]
+geoip_mmdb = ""                      # path to a MaxMind GeoLite2-City .mmdb for the
+                                     # device map; empty = CDN geo headers only
+                                     # (CF-IPCountry etc., needs trust_proxy)
+retention_days = 14                  # raw error events / logs / metric points

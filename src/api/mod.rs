@@ -65,6 +65,7 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/orgs/{slug}/apps/{app}/clients",
             get(apps::app_clients),
         )
+        .route("/api/v1/orgs/{slug}/apps/{app}/geo", get(apps::app_geo))
         .route(
             "/api/v1/orgs/{slug}/apps/{app}/channels",
             post(apps::create_channel),
