@@ -43,7 +43,18 @@ export async function publishCommand(opts: PublishOptions): Promise<void> {
   console.log("Resolving Expo config (npx expo config --json --type public)...");
   const expoConfig = resolveExpoConfig(ctx.projectDir);
 
-  let runtimeVersion = opts.runtimeVersion ?? resolveRuntimeVersion(expoConfig);
+  let runtimeVersion = opts.runtimeVersion ?? null;
+  if (!runtimeVersion) {
+    const platforms: ("ios" | "android")[] = platform === "all" ? ["ios", "android"] : [platform];
+    const resolved = platforms.map((p) => resolveRuntimeVersion(expoConfig, p));
+    if (resolved.length === 2 && resolved[0] && resolved[1] && resolved[0] !== resolved[1]) {
+      throw new Error(
+        `iOS and Android resolve to different runtime versions (${resolved[0]} vs ${resolved[1]}). ` +
+          "Publish each platform separately with --platform ios / --platform android."
+      );
+    }
+    runtimeVersion = resolved.every((r) => r === resolved[0]) ? (resolved[0] ?? null) : null;
+  }
   if (!runtimeVersion) {
     throw new Error(
       "Could not resolve the runtime version from your Expo config " +

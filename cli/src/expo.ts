@@ -54,9 +54,17 @@ export function resolveExpoConfig(cwd: string): Record<string, unknown> {
  * Returns null when it cannot be resolved (caller should require --runtime-version).
  */
 export function resolveRuntimeVersion(
-  config: Record<string, unknown>
+  config: Record<string, unknown>,
+  platform: "ios" | "android"
 ): string | null {
-  const rv = config.runtimeVersion;
+  // A platform-level runtimeVersion (ios.runtimeVersion / android.runtimeVersion)
+  // overrides the top-level one, exactly as expo-updates resolves it for builds.
+  const platformConfig = config[platform];
+  const platformRv =
+    platformConfig && typeof platformConfig === "object"
+      ? (platformConfig as { runtimeVersion?: unknown }).runtimeVersion
+      : undefined;
+  const rv = platformRv ?? config.runtimeVersion;
   if (typeof rv === "string" && rv.length > 0) return rv;
   if (rv && typeof rv === "object") {
     const policy = (rv as { policy?: unknown }).policy;
@@ -65,8 +73,9 @@ export function resolveRuntimeVersion(
       return typeof version === "string" && version.length > 0 ? version : null;
     }
     if (policy === "sdkVersion") {
+      // expo-updates prefixes the SDK policy: builds request "exp@52.0.0".
       const sdk = config.sdkVersion;
-      return typeof sdk === "string" && sdk.length > 0 ? sdk : null;
+      return typeof sdk === "string" && sdk.length > 0 ? `exp@${sdk}` : null;
     }
     return null; // nativeVersion, fingerprint, custom functions: not resolvable here
   }
