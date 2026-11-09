@@ -8,7 +8,10 @@
 # What it covers, all on the device:
 #   embedded launch → publish v2 → fetch+reload → up-to-date → cold start
 #   keeps v2 → publish v3 → channel rollback (back to v2) →
-#   rollback-to-embedded → cold start stays embedded → publish v4 recovers.
+#   rollback-to-embedded → cold start stays embedded → publish v4 recovers →
+#   update-only image asset → bsdiff patch applied (no full fallback) →
+#   gated channel + promote → staged rollout 0.001% → 100% → channel
+#   repoint to another branch and back.
 #
 # Needs: cargo, bun, node (npx), maestro, plus Xcode or the Android SDK.
 # Env overrides: AIRLIFT_BIN, S3_STUB_BIN, SKIP_CARGO_BUILD=1, SIM_UDID,
@@ -173,6 +176,7 @@ flow() { # flow-file KEY=VAL...
   STEP=$((STEP + 1))
   local env_args=()
   for kv in "$@"; do env_args+=(-e "$kv"); done
+  case " $* " in *" EXTRA="*) ;; *) env_args+=(-e EXTRA=none) ;; esac
   log "[$STEP] maestro $file $*"
   if [ "${E2E_DRY_RUN:-}" = 1 ]; then return 0; fi
   if ! maestro ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} test --debug-output "$WORK/maestro/$STEP-${file%.yaml}" \
@@ -186,7 +190,7 @@ flow() { # flow-file KEY=VAL...
 device_diagnostics() {
   echo "---- app screen (key:value labels) ----"
   maestro ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} hierarchy 2>/dev/null \
-    | grep -oE '(marker|origin|update-id|channel|status):[^"]*' | sort -u || true
+    | grep -oE '(marker|origin|update-id|channel|status|extra):[^"]*' | sort -u || true
   if [ "$PLATFORM" = android ]; then
     adb logcat -d >"$WORK/device.log" 2>&1 || true
     echo "---- device log (expo-updates, tail) ----"
@@ -198,17 +202,51 @@ device_diagnostics() {
     grep -iE 'expo|update|error|ATS|App Transport' "$WORK/device.log" | tail -n 60 || true
   fi
 }
-publish() { # marker
-  sed "s/MARKER = '.*'/MARKER = '$1'/" "$WORK/marker.js.orig" >"$APP/marker.js"
-  log "publish $1"
-  cli publish --branch "$CHANNEL" --platform "$PLATFORM" --message "$1"
+GROUP=""
+publish() { # marker [branch] [with-extra] — sets GROUP to the new update group
+  local marker="$1" branch="${2:-$CHANNEL}" extra="${3:-}"
+  local sed_args=(-e "s/MARKER = '.*'/MARKER = '$marker'/")
+  if [ -n "$extra" ]; then sed_args+=(-e "s|EXTRA = null|EXTRA = require('./assets/extra.png')|"); fi
+  sed "${sed_args[@]}" "$WORK/marker.js.orig" >"$APP/marker.js"
+  log "publish $marker → branch $branch${extra:+ (+ new image asset)}"
+  cli publish --branch "$branch" --platform "$PLATFORM" --message "$marker" | tee "$WORK/publish.out"
+  GROUP="$(sed -n 's/^Published update group //p' "$WORK/publish.out")"
+  [ -n "$GROUP" ] || die "publish $marker: no group id in CLI output"
+}
+APP_PATH="/api/v1/orgs/$ORG/apps/$APP_SLUG"
+APP_ID="$(jq -r .appId "$APP/airlift.json")"
+# What the production channel serves right now, as the manifest part JSON.
+manifest() {
+  curl -fsS "$SERVER/u/$APP_ID/manifest" -H 'expo-protocol-version: 1' \
+    -H "expo-platform: $PLATFORM" -H "expo-runtime-version: $RUNTIME" \
+    -H "expo-channel-name: $CHANNEL" -H 'accept: multipart/mixed' \
+    | tr -d '\r' | grep -m1 '"launchAsset"'
+}
+metric() { # name → sum over all label sets (0 if absent)
+  curl -fsS -b "$JAR" "$SERVER/metrics" | awk -v m="$1" '$1 == m || index($1, m "{") == 1 { s += $2 } END { print s + 0 }'
+}
+# Generate the from→(current release) bsdiff patch ahead of time (the server
+# builds patches lazily on first request), so the device's fetch gets 226.
+prewarm_patch() { # from-update-id
+  local m to url code=""
+  m="$(manifest)"
+  to="$(jq -r .id <<<"$m")"
+  url="$(jq -r .launchAsset.url <<<"$m")"
+  for _ in $(seq 1 90); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' "$url" -H 'a-im: bsdiff' \
+      -H "expo-current-update-id: $1" -H "expo-requested-update-id: $to")"
+    if [ "$code" = 226 ]; then return 0; fi
+    sleep 1
+  done
+  die "bsdiff patch $1 → $to never became ready (last HTTP $code; see airlift.log)"
 }
 
+# ── basics: embedded → OTA → persisted → rollback → rollback-to-embedded ──
 flow launch.yaml MARKER=embedded ORIGIN=embedded
 
 publish v2
 flow update.yaml MARKER=v2 ORIGIN=update
-flow up-to-date.yaml
+flow up-to-date.yaml MARKER=v2
 flow launch.yaml MARKER=v2 ORIGIN=update
 
 publish v3
@@ -219,14 +257,65 @@ cli rollback --channel "$CHANNEL" --runtime-version "$RUNTIME"
 flow update.yaml MARKER=v2 ORIGIN=update
 
 log "rollback-to-embedded on branch $CHANNEL"
-curl -fsS -X POST "$SERVER/api/v1/orgs/$ORG/apps/$APP_SLUG/branches/$CHANNEL/rollback-to-embedded" \
+curl -fsS -X POST "$SERVER$APP_PATH/branches/$CHANNEL/rollback-to-embedded" \
   -H "authorization: Bearer $AIRLIFT_TOKEN" -H 'content-type: application/json' \
-  -d '{"runtime_version":"'$RUNTIME'"}' >/dev/null
+  -d '{"runtime_version":"'"$RUNTIME"'"}' >/dev/null
 flow update.yaml MARKER=embedded ORIGIN=embedded
 flow launch.yaml MARKER=embedded ORIGIN=embedded
 
 publish v4
 flow update.yaml MARKER=v4 ORIGIN=update
+
+# ── an asset the build never had: downloaded, loadable, survives a restart ──
+publish v5 "$CHANNEL" extra
+flow update.yaml MARKER=v5 ORIGIN=update EXTRA=loaded
+flow launch.yaml MARKER=v5 ORIGIN=update EXTRA=loaded
+
+# ── bsdiff: the real client applies our BSDIFF40 patch (no full fallback) ──
+FROM_ID="$(manifest | jq -r .id)" # the update the device runs (v5)
+publish v6
+log "prewarm bsdiff patch $FROM_ID → v6"
+prewarm_patch "$FROM_ID"
+PATCHES_BEFORE="$(metric airlift_patch_served_total)"
+REDIRECTS_BEFORE="$(metric airlift_asset_redirects_total)"
+flow update.yaml MARKER=v6 ORIGIN=update
+if [ "${E2E_DRY_RUN:-}" != 1 ]; then
+  PATCHES_AFTER="$(metric airlift_patch_served_total)"
+  REDIRECTS_AFTER="$(metric airlift_asset_redirects_total)"
+  log "patches served $PATCHES_BEFORE → $PATCHES_AFTER, asset redirects $REDIRECTS_BEFORE → $REDIRECTS_AFTER"
+  [ "$PATCHES_AFTER" -gt "$PATCHES_BEFORE" ] || die "device did not request the bsdiff patch"
+  # A rejected patch makes the client re-download the full bundle (a 307).
+  [ "$REDIRECTS_AFTER" -eq "$REDIRECTS_BEFORE" ] || die "device fell back to the full bundle after the patch"
+fi
+
+# ── gated channel: a publish waits for promote ──
+log "gate channel $CHANNEL (auto_release=false)"
+api PATCH "$APP_PATH/channels/$CHANNEL" '{"auto_release":false}' >/dev/null
+publish v7
+flow up-to-date.yaml MARKER=v6
+cli promote --channel "$CHANNEL" --group "$GROUP"
+flow update.yaml MARKER=v7 ORIGIN=update
+
+# ── staged rollout: held back at 0.001%, delivered at 100% ──
+publish v8
+log "start rollout of v8 at 0.001%"
+api POST "$APP_PATH/channels/$CHANNEL/rollout" '{"group_id":"'"$GROUP"'","percent":0.001}' >/dev/null
+flow up-to-date.yaml MARKER=v7
+log "grow rollout to 100%"
+api PATCH "$APP_PATH/channels/$CHANNEL/rollout" '{"runtime_version":"'"$RUNTIME"'","percent":100}' >/dev/null
+flow update.yaml MARKER=v8 ORIGIN=update
+api PATCH "$APP_PATH/channels/$CHANNEL" '{"auto_release":true}' >/dev/null
+
+# ── repoint the channel to another branch, then back (older head re-served
+#    under a fresh identity, or the client would ignore it) ──
+publish v9 hotfix
+log "repoint channel $CHANNEL → branch hotfix"
+api PATCH "$APP_PATH/channels/$CHANNEL" '{"branch":"hotfix"}' >/dev/null
+flow update.yaml MARKER=v9 ORIGIN=update
+log "repoint channel $CHANNEL → branch $CHANNEL"
+api PATCH "$APP_PATH/channels/$CHANNEL" '{"branch":"'"$CHANNEL"'"}' >/dev/null
+flow update.yaml MARKER=v8 ORIGIN=update
+flow launch.yaml MARKER=v8 ORIGIN=update
 
 log "server-side counters"
 curl -fsS -b "$JAR" "$SERVER/metrics" | grep -E '^airlift_(manifest|asset|patch)' || true

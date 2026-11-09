@@ -1,8 +1,15 @@
-# Tap "Check for update" and assert the server reported nothing new.
+# Tap "Check for update" and assert the server reported nothing new, and
+# the app stayed on the expected bundle.
+# env: MARKER
 appId: dev.airlift.e2e
 ---
 - launchApp:
     stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: status
+      text: "status:idle"
+    timeout: 60000
 - tapOn:
     id: check
 - extendedWaitUntil:
@@ -10,3 +17,6 @@ appId: dev.airlift.e2e
       id: status
       text: "status:up-to-date.*"
     timeout: 60000
+- assertVisible:
+    id: marker
+    text: "marker:${MARKER}"

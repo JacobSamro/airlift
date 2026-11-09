@@ -1,10 +1,16 @@
 # Tap "Check for update" (checkForUpdateAsync → fetchUpdateAsync →
 # reloadAsync) and assert the app reloaded into the expected bundle.
-# env: MARKER, ORIGIN
+# env: MARKER, ORIGIN, EXTRA (none|loaded; run.sh defaults it to none)
 appId: dev.airlift.e2e
 ---
 - launchApp:
     stopApp: false
+# Don't tap before the JS tree is up and idle.
+- extendedWaitUntil:
+    visible:
+      id: status
+      text: "status:idle"
+    timeout: 60000
 - tapOn:
     id: check
 - extendedWaitUntil:
@@ -15,3 +21,8 @@ appId: dev.airlift.e2e
 - assertVisible:
     id: origin
     text: "origin:${ORIGIN}"
+- extendedWaitUntil:
+    visible:
+      id: extra
+      text: "extra:${EXTRA}"
+    timeout: 30000

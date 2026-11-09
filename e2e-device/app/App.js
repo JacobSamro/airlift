@@ -5,10 +5,13 @@ import { useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import * as Updates from 'expo-updates';
 
-import { MARKER } from './marker';
+import { EXTRA, MARKER } from './marker';
 
 export default function App() {
   const [status, setStatus] = useState('idle');
+  // An image only some published updates carry (never embedded): proves a
+  // brand-new asset was downloaded and is loadable.
+  const [extra, setExtra] = useState(EXTRA ? 'pending' : 'none');
 
   async function checkAndApply() {
     setStatus('checking');
@@ -39,6 +42,15 @@ export default function App() {
       <Text testID="update-id">{`update-id:${Updates.updateId ?? 'none'}`}</Text>
       <Text testID="channel">{`channel:${Updates.channel ?? 'none'}`}</Text>
       <Text testID="status">{`status:${status}`}</Text>
+      {EXTRA ? (
+        <Image
+          source={EXTRA}
+          style={styles.logo}
+          onLoad={() => setExtra('loaded')}
+          onError={() => setExtra('error')}
+        />
+      ) : null}
+      <Text testID="extra">{`extra:${extra}`}</Text>
       <Pressable testID="check" onPress={checkAndApply} style={styles.button}>
         <Text style={styles.buttonText}>Check for update</Text>
       </Pressable>
