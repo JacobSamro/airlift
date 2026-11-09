@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { generateCertsCommand } from "./commands/certs";
 import { promoteCommand, rollbackCommand } from "./commands/channel";
+import { doctorCommand } from "./commands/doctor";
 import { initCommand } from "./commands/init";
+import { republishCommand, rolloutCommand, splitCommand } from "./commands/rollout";
 import { listCommand } from "./commands/list";
 import { publishCommand } from "./commands/publish";
 
@@ -56,6 +59,7 @@ withCommonOptions(
       "--runtime-version <rv>",
       "override the runtime version (required if it cannot be derived from your Expo config)"
     )
+    .option("--rollout <percent>", "auto-release channels start a progressive rollout at this share")
 ).action(async (opts) => {
   try {
     await publishCommand(opts);
@@ -101,6 +105,81 @@ withCommonOptions(
 ).action(async (opts) => {
   try {
     await listCommand(opts);
+  } catch (err) {
+    fail(err);
+  }
+});
+
+withCommonOptions(
+  program
+    .command("rollout")
+    .description(
+      "Progressive rollout: start one for --group, or move the running one for --runtime-version (100 completes it)"
+    )
+    .requiredOption("--channel <name>", "channel to roll out on")
+    .requiredOption("--percent <n>", "share of devices (0-100]")
+    .option("--group <group_id>", "update group to start rolling out")
+    .option("--runtime-version <rv>", "runtime of the running rollout to adjust")
+).action(async (opts) => {
+  try {
+    await rolloutCommand(opts);
+  } catch (err) {
+    fail(err);
+  }
+});
+
+withCommonOptions(
+  program
+    .command("split")
+    .description("A/B split: serve another branch to a share of a channel's devices")
+    .requiredOption("--channel <name>", "channel to split")
+    .option("--branch <name>", "branch the split share gets")
+    .option("--percent <n>", "share of devices (0-100)")
+    .option("--off", "end the split")
+).action(async (opts) => {
+  try {
+    await splitCommand(opts);
+  } catch (err) {
+    fail(err);
+  }
+});
+
+withCommonOptions(
+  program
+    .command("republish")
+    .description("Re-ship an existing update group as a brand-new update")
+    .requiredOption("--group <group_id>", "update group to republish")
+    .option("--channel <name>", "release the copy to this channel (default: like a publish to its branch)")
+).action(async (opts) => {
+  try {
+    await republishCommand(opts);
+  } catch (err) {
+    fail(err);
+  }
+});
+
+withCommonOptions(
+  program
+    .command("doctor")
+    .description("Check this project's Expo config against the airlift server")
+).action(async (opts) => {
+  try {
+    await doctorCommand(opts);
+  } catch (err) {
+    fail(err);
+  }
+});
+
+withCommonOptions(
+  program
+    .command("generate-certs")
+    .description(
+      "Rotate the code-signing key: create a new server key, save its certificate, point app.json at it"
+    )
+    .option("--keyid <id>", "name for the new key (default k<YYYYMMDD>)")
+).action(async (opts) => {
+  try {
+    await generateCertsCommand(opts);
   } catch (err) {
     fail(err);
   }

@@ -18,6 +18,7 @@ export interface PublishOptions extends CommonOptions {
   message?: string;
   platform: string;
   runtimeVersion?: string;
+  rollout?: string;
 }
 
 export async function publishCommand(opts: PublishOptions): Promise<void> {
@@ -81,6 +82,7 @@ export async function publishCommand(opts: PublishOptions): Promise<void> {
     if (opts.message) form.append("message", opts.message);
     if (git.branch) form.append("git_branch", git.branch);
     if (git.commit) form.append("git_commit", git.commit);
+    if (opts.rollout) form.append("rollout_percent", opts.rollout);
     form.append("expo_config", JSON.stringify(expoConfig));
     form.append(
       "archive",
@@ -113,7 +115,10 @@ export async function publishCommand(opts: PublishOptions): Promise<void> {
       console.log(
         renderTable(
           ["CHANNEL", "STATUS"],
-          result.channels.map((c) => [c.channel, c.status])
+          result.channels.map((c) => [
+            c.channel,
+            c.status === "rolling_out" ? `rolling out (${c.percent}%)` : c.status,
+          ])
         )
       );
     } else {

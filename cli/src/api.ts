@@ -85,6 +85,21 @@ export async function postJson<T>(
   return (await res.json()) as T;
 }
 
+/** JSON request with any method (PUT/PATCH/DELETE…). */
+export async function sendJson<T>(
+  client: ApiClient,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<T> {
+  const res = await request(client, path, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return (await res.json()) as T;
+}
+
 export async function postForm<T>(
   client: ApiClient,
   path: string,
@@ -143,5 +158,5 @@ export interface PublishResult {
   branch: string;
   runtime_version: string;
   platforms: string[];
-  channels: { channel: string; status: "released" | "pending" }[];
+  channels: { channel: string; status: "released" | "pending" | "rolling_out"; percent?: number }[];
 }

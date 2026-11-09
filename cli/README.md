@@ -69,7 +69,9 @@ airlift publish --branch main [--channel production] [--message "fix crash"] [--
 2. Determines the runtime version:
    - a literal `runtimeVersion` string is used as-is;
    - `{ "policy": "appVersion" }` uses the config's `version`;
-   - `{ "policy": "sdkVersion" }` uses the config's `sdkVersion`;
+   - `{ "policy": "sdkVersion" }` uses `exp@<sdkVersion>` (what builds request);
+   - `ios.runtimeVersion` / `android.runtimeVersion` override the top-level value per platform
+     (if they differ, publish each platform separately with `--platform`);
    - anything else (e.g. `fingerprint`, `nativeVersion`) requires an explicit `--runtime-version <rv>`.
 3. Runs `npx expo export` into a temporary directory (all platforms by default, or one via `--platform`).
 4. Zips the export output and uploads it, along with the resolved Expo config and best-effort git branch/commit metadata.
@@ -78,6 +80,8 @@ airlift publish --branch main [--channel production] [--message "fix crash"] [--
 Channels that auto-release from the branch show `released`; channels requiring manual release show `pending`. With `--channel <name>`, if that channel is pending the CLI prints the exact `airlift promote` command to run — it never auto-promotes.
 
 If the server responds with 409, an update with identical contents is already at the head of that branch; nothing is published.
+
+With `--rollout <percent>`, auto-release channels start a progressive rollout at that share instead of releasing to everyone (see `airlift rollout`).
 
 ### `airlift promote`
 
@@ -93,7 +97,50 @@ Releases a previously published update group to a channel.
 airlift rollback --channel production --runtime-version 1.2.0
 ```
 
-Rolls the channel back to the previous release for that runtime version.
+Rolls the channel back to the previous release it shipped for that runtime version. The old update is re-served under a fresh identity, so devices already on the newer one actually switch back.
+
+### `airlift rollout`
+
+```sh
+airlift rollout --channel production --group <group_id> --percent 10        # start
+airlift rollout --channel production --runtime-version 1.2.0 --percent 50   # grow
+airlift rollout --channel production --runtime-version 1.2.0 --percent 100  # complete
+```
+
+Progressive rollout: only the given share of devices gets the update; the rest keep the last full release. Devices are bucketed by `sha256(EAS-Client-ID:salt)`, so a device that is in at 10% stays in at 50%. Devices without a client id are never in. To pull a rollout back from devices, use `airlift rollback`.
+
+### `airlift split`
+
+```sh
+airlift split --channel production --branch experiment --percent 20
+airlift split --channel production --off
+```
+
+A/B split: a stable share of the channel's devices gets another branch (served through a managed `production~experiment` channel with its own releases, rollouts and rollbacks).
+
+### `airlift republish`
+
+```sh
+airlift republish --group <group_id> [--channel production]
+```
+
+Publishes an existing update group again as a brand-new update (new ids, fresh timestamp, same assets). With `--channel` the copy is released there; otherwise it advances the group's branch like a publish.
+
+### `airlift generate-certs`
+
+```sh
+airlift generate-certs [--keyid k2]
+```
+
+Rotates the code-signing key without breaking builds in the field: the server creates a new key (the private key never leaves it), the CLI writes `certs/certificate-<keyid>.pem` and points `app.json` at it (`codeSigningCertificate`, `codeSigningMetadata.keyid`). Existing builds keep verifying with their old key; make a new native build to switch.
+
+### `airlift doctor`
+
+```sh
+airlift doctor
+```
+
+Checks the project against the server: update URL, code-signing certificate/keyid/alg match one of the app's keys, the request-header channel exists, each platform's runtime version has a release on it, and `expo-updates` is installed. Exits non-zero on problems.
 
 ### `airlift list`
 
