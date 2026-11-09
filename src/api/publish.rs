@@ -182,6 +182,16 @@ pub async fn publish(
             },
         );
     }
+    // The Expo config is served to the app (Constants.expoConfig), so a
+    // config-only change is a real new update. Hash it canonically (sorted
+    // keys) so key order alone doesn't count as a change.
+    if let Some(cfg) = &expo_config {
+        let canonical = serde_json::from_str::<serde_json::Value>(cfg)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| cfg.clone());
+        content_hasher.update(b"\0expo_config\0");
+        content_hasher.update(canonical.as_bytes());
+    }
     let content_hash = hex::encode(content_hasher.finalize());
 
     // ── create the group (refusing a byte-identical republish of the head) ──

@@ -76,16 +76,24 @@ async fn setup_instance(server: &Airlift) -> Ctx {
 
 /// Publish an export zip to a branch with the PAT; returns the response JSON.
 async fn publish(ctx: &Ctx, branch: &str, runtime: &str, zip: Vec<u8>) -> (u16, Value) {
+    let config = json!({ "name": "Acme Mobile", "slug": "mobile" });
+    publish_with_config(ctx, branch, runtime, zip, config).await
+}
+
+async fn publish_with_config(
+    ctx: &Ctx,
+    branch: &str,
+    runtime: &str,
+    zip: Vec<u8>,
+    config: Value,
+) -> (u16, Value) {
     let form = reqwest::multipart::Form::new()
         .text("branch", branch.to_string())
         .text("runtime_version", runtime.to_string())
         .text("message", "test release")
         .text("git_branch", "main")
         .text("git_commit", "abc1234")
-        .text(
-            "expo_config",
-            json!({ "name": "Acme Mobile", "slug": "mobile" }).to_string(),
-        )
+        .text("expo_config", config.to_string())
         .part(
             "archive",
             reqwest::multipart::Part::bytes(zip).file_name("dist.zip"),
@@ -217,6 +225,26 @@ async fn publish_and_serve_lifecycle() {
     )
     .await;
     assert_eq!(status, 409);
+
+    // ── …but a config-only change (served as Constants.expoConfig) ships ──
+    let (status, body) = publish_with_config(
+        &ctx,
+        "staging",
+        "1.0.0",
+        export_zip(&["ios"], "cfg"),
+        json!({ "slug": "mobile", "extra": { "apiUrl": "a" } }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = publish_with_config(
+        &ctx,
+        "staging",
+        "1.0.0",
+        export_zip(&["ios"], "cfg"),
+        json!({ "slug": "mobile", "extra": { "apiUrl": "b" } }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
 
     // ── the client gets a signed manifest ──
     let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
