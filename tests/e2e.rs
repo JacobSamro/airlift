@@ -1514,3 +1514,32 @@ async fn signing_key_rotation_keeps_old_builds_verifying() {
     assert_eq!(m1["id"], m2["id"]);
     assert_eq!(request("nope").await.unwrap().status(), 400);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn republish_reships_an_old_update_as_new() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    let (_, b1) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "good")).await;
+    let g1 = b1["group_id"].as_str().unwrap().to_string();
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
+    let good = verified_part(&ctx, resp, "manifest").await;
+    publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "bad")).await;
+
+    let resp = ctx
+        .http
+        .post(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/updates/{g1}/republish",
+            ctx.base
+        ))
+        .json(&json!({ "channel": "production" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
+    let m = verified_part(&ctx, resp, "manifest").await;
+    assert_eq!(m["launchAsset"]["hash"], good["launchAsset"]["hash"]);
+    assert_ne!(m["id"], good["id"]);
+    assert!(m["createdAt"].as_str().unwrap() > good["createdAt"].as_str().unwrap());
+}

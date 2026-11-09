@@ -820,6 +820,72 @@ fn valid_percent(p: f64) -> Result<f64> {
     }
 }
 
+// ───────────────────────── republish ─────────────────────────
+
+#[derive(Deserialize, Default)]
+pub struct RepublishReq {
+    /// Release the copy to this channel only. Without it the copy advances
+    /// the group's branch like a fresh publish (auto-release channels go
+    /// live, gated ones wait).
+    channel: Option<String>,
+}
+
+/// Publish an existing update group again as a brand-new update (new ids,
+/// fresh createdAt, same assets) — e.g. to re-ship a known-good build that
+/// devices would otherwise consider older than what they run.
+pub async fn republish(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug, group_id)): Path<(String, String, String)>,
+    body: Option<Json<RepublishReq>>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let group = db::updates::find_group(state.db(), &group_id)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let branches = db::updates::list_branches(state.db(), &app.id).await?;
+    let branch = branches
+        .into_iter()
+        .find(|b| b.id == group.branch_id)
+        .ok_or(Error::NotFound)?;
+    let copy = db::updates::republish_group(state.db(), &group).await?;
+    let mut tx = state.db().begin_with("BEGIN IMMEDIATE").await?;
+    let released = match &req.channel {
+        Some(name) => {
+            let ch = db::updates::find_channel(&mut *tx, &app.id, name)
+                .await?
+                .ok_or_else(|| Error::bad_request("no such channel"))?;
+            db::updates::set_channel_release_tx(&mut tx, &ch.id, &copy.runtime_version, &copy.id)
+                .await?;
+            vec![json!({ "channel": ch.name, "status": "released" })]
+        }
+        None => super::publish::advance_channels(&mut tx, &app, &branch, &copy, None).await?,
+    };
+    tx.commit().await?;
+    db::audit::record(
+        state.db(),
+        Some(&caller.user.id),
+        Some(&app.org_id),
+        "update.republish",
+        Some(&format!("{}/{}", app.slug, branch.name)),
+        Some(&format!("{} -> {}", group.id, copy.id)),
+    )
+    .await
+    .ok();
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "group_id": copy.id,
+            "source_group_id": group.id,
+            "branch": branch.name,
+            "runtime_version": copy.runtime_version,
+            "channels": released,
+        })),
+    )
+        .into_response())
+}
+
 #[derive(Deserialize)]
 pub struct RollbackReq {
     runtime_version: String,
