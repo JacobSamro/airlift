@@ -85,10 +85,16 @@ pub async fn create_app(
     Path(slug): Path<String>,
     Json(req): Json<CreateAppReq>,
 ) -> Result<Response> {
-    let (org, role) = super::admin_of(&state, &caller.user.id, &slug).await?;
-    let _ = role;
+    let (org, _role) = super::admin_of(&state, &caller.user.id, &slug).await?;
     if caller.cap < Permission::Admin {
         return Err(Error::Forbidden);
+    }
+    // Token resource scope: only unscoped or this-org tokens may create apps
+    // (an app-scoped token can't mint new apps, even in its own org).
+    match &caller.scope {
+        TokenScope::All => {}
+        TokenScope::Org(oid) if *oid == org.id => {}
+        _ => return Err(Error::Forbidden),
     }
     if !valid_slug(&req.slug) {
         return Err(Error::bad_request(

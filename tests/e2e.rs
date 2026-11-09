@@ -736,6 +736,25 @@ async fn publish_requires_a_capable_token() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 
+    // An admin token scoped to one app can't create apps (scope ∩ cap).
+    let resp = ctx
+        .http
+        .post(format!("{}/api/v1/tokens", ctx.base))
+        .json(&json!({ "name": "one-app", "org": "acme", "app": "mobile", "permission": "admin" }))
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = resp.json().await.unwrap();
+    let app_pat = v["token"].as_str().unwrap().to_string();
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/v1/orgs/acme/apps", ctx.base))
+        .bearer_auth(&app_pat)
+        .json(&json!({ "slug": "sneaky", "name": "Sneaky" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
     // No token at all → 401.
     let form = reqwest::multipart::Form::new()
         .text("branch", "production")
