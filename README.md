@@ -141,6 +141,11 @@ it like a device: it parses multipart manifests, verifies the RSA signatures
 against the served certificate, and exercises publish/promote/rollback/
 directive flows.
 
+## Disclaimer
+
+airlift is **not officially supported or affiliated with [Expo](https://expo.dev/)**.
+This is an independent open-source project.
+
 ## License
 
 MIT
