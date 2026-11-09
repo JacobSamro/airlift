@@ -17,18 +17,7 @@ use crate::error::{Error, Result};
 use crate::models::{OrgRole, Permission, TokenScope};
 use crate::state::AppState;
 
-fn json_ok<T: serde::Serialize>(v: T) -> Response {
-    (StatusCode::OK, Json(v)).into_response()
-}
-
-fn valid_slug(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 40
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !s.starts_with('-')
-        && !s.ends_with('-')
-}
+use super::{json_ok, valid_slug};
 
 /// Resolve `{org}/{app}` and require `needed` permission for the caller.
 async fn resolve_app(

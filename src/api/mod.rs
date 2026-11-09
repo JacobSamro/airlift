@@ -127,11 +127,11 @@ pub fn routes() -> Router<AppState> {
 
 // ───────────────────────── helpers ─────────────────────────
 
-fn json_ok<T: serde::Serialize>(v: T) -> Response {
+pub(crate) fn json_ok<T: serde::Serialize>(v: T) -> Response {
     (StatusCode::OK, Json(v)).into_response()
 }
 
-fn valid_slug(s: &str) -> bool {
+pub(crate) fn valid_slug(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 40
         && s.chars()
