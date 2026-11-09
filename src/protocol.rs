@@ -113,7 +113,7 @@ async fn manifest(
 
     let Some(group) = group else {
         track("no_update", "");
-        return no_update_response(&state, &app, protocol, expect_signature);
+        return no_update_response(&state, &app, protocol, expect_signature).await;
     };
 
     // A rollback group emits the protocol-1 directive; protocol-0 clients
@@ -132,7 +132,8 @@ async fn manifest(
                 "directive",
                 &directive,
                 expect_signature,
-            );
+            )
+            .await;
         }
         return Ok(no_update_v0());
     }
@@ -140,14 +141,14 @@ async fn manifest(
     let updates = db::updates::updates_in_group(state.db(), &group.id).await?;
     let Some(update) = updates.into_iter().find(|u| u.platform == platform) else {
         track("no_update", "");
-        return no_update_response(&state, &app, protocol, expect_signature);
+        return no_update_response(&state, &app, protocol, expect_signature).await;
     };
 
     // The client is already running exactly this update. Attribute the
     // check-in to that update so adoption stats count settled devices.
     if current_update_id.as_deref() == Some(&update.id.to_ascii_lowercase()) {
         track("up_to_date", &update.id);
-        return no_update_response(&state, &app, protocol, expect_signature);
+        return no_update_response(&state, &app, protocol, expect_signature).await;
     }
     track("manifest", &update.id);
 
@@ -205,12 +206,13 @@ async fn manifest(
         &manifest,
         expect_signature,
     )
+    .await
 }
 
 /// Protocol 1 answers "you're current" with a directive; protocol 0 has no
 /// directives, so it gets a 404-style JSON (matching the original expo
 /// updates server's behavior).
-fn no_update_response(
+async fn no_update_response(
     state: &AppState,
     app: &db::apps::App,
     protocol: u8,
@@ -225,7 +227,8 @@ fn no_update_response(
             "directive",
             &directive,
             expect_signature,
-        );
+        )
+        .await;
     }
     Ok(no_update_v0())
 }
@@ -240,7 +243,7 @@ fn no_update_v0() -> Response {
 
 /// Assemble the `multipart/mixed` protocol response with one JSON part
 /// (`manifest` or `directive`) plus the `extensions` part.
-fn multipart_response(
+async fn multipart_response(
     state: &AppState,
     app: &db::apps::App,
     protocol: u8,
@@ -253,7 +256,7 @@ fn multipart_response(
         .map_err(|e| Error::Other(anyhow::anyhow!("manifest serialize: {e}")))?;
 
     let signature = if expect_signature {
-        Some(sign_rsa_sha256(&app.private_key_pem, body_json.as_bytes())?)
+        Some(sign_for_app(app, body_json.as_bytes().to_vec()).await?)
     } else {
         None
     };
@@ -316,11 +319,46 @@ fn multipart_response(
 
 /// RSA-SHA256 (pkcs1v15) signature over `bytes`, base64 (standard) encoded —
 /// the `alg: "rsa-v1_5-sha256"` scheme expo-updates expects.
+#[cfg(test)]
 fn sign_rsa_sha256(private_key_pem: &str, bytes: &[u8]) -> Result<String> {
     let key = crate::keys::private_key_from_pem(private_key_pem)?;
-    let signing_key = SigningKey::<RsaSha256>::new(key);
-    let signature = signing_key.sign(bytes);
-    Ok(base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()))
+    Ok(sign_with(&SigningKey::<RsaSha256>::new(key), bytes))
+}
+
+fn sign_with(key: &SigningKey<RsaSha256>, bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(key.sign(bytes).to_bytes())
+}
+
+/// Parsed signing keys per app, keyed by app id and checked against the PEM
+/// (so a rotated key is picked up). Parsing a PKCS#8 RSA key on every
+/// manifest request was pure waste on the hot path.
+#[allow(clippy::type_complexity)]
+static SIGNERS: std::sync::LazyLock<
+    dashmap::DashMap<String, (String, std::sync::Arc<SigningKey<RsaSha256>>)>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+/// Sign `bytes` with the app's key. RSA signing is CPU work, so it (and any
+/// key parse) runs on the blocking pool, not an async worker.
+async fn sign_for_app(app: &db::apps::App, bytes: Vec<u8>) -> Result<String> {
+    let cached = SIGNERS
+        .get(&app.id)
+        .filter(|e| e.0 == app.private_key_pem)
+        .map(|e| e.1.clone());
+    let pem = app.private_key_pem.clone();
+    let (key, sig) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let key = match cached {
+            Some(k) => k,
+            None => std::sync::Arc::new(SigningKey::<RsaSha256>::new(
+                crate::keys::private_key_from_pem(&pem)?,
+            )),
+        };
+        let sig = sign_with(&key, &bytes);
+        Ok((key, sig))
+    })
+    .await
+    .map_err(|e| Error::Other(anyhow::anyhow!("signing task: {e}")))??;
+    SIGNERS.insert(app.id.clone(), (app.private_key_pem.clone(), key));
+    Ok(sig)
 }
 
 /// Convert a stored hex sha256 into the base64url (no padding) form the
