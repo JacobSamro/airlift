@@ -12,10 +12,16 @@ appId: dev.airlift.e2e
       id: status
       text: "status:idle"
     timeout: 60000
-# Retry an undelivered tap (status always changes when it lands).
-- tapOn:
-    id: check
-    retryTapIfNoChange: true
+- runFlow: tap-check.yaml
+# A check never ends in "idle", so still idle ⇒ the tap was dropped.
+- repeat:
+    times: 3
+    while:
+      visible:
+        id: status
+        text: "status:idle"
+    commands:
+      - runFlow: tap-check.yaml
 - extendedWaitUntil:
     visible:
       id: status

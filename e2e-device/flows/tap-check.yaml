@@ -1,0 +1,16 @@
+# Tap "Check for update" and give the app a moment to react. A tap that
+# lands always moves status off "idle" (checking → … or a reload); on a
+# busy iOS simulator a synthesized tap is sometimes dropped by the app
+# (Maestro reports COMPLETED, onPress never fires), so callers re-run this
+# while the app is still idle.
+appId: dev.airlift.e2e
+---
+- tapOn:
+    id: check
+    retryTapIfNoChange: true
+- extendedWaitUntil:
+    notVisible:
+      id: status
+      text: "status:idle"
+    timeout: 8000
+    optional: true

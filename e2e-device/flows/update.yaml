@@ -12,12 +12,19 @@ appId: dev.airlift.e2e
       id: status
       text: "status:(idle|up-to-date.*)"
     timeout: 60000
-# On a busy iOS simulator a tap can be "COMPLETED" yet never reach the app.
-# A delivered tap always changes the screen (status → checking), so retry
-# until it does.
-- tapOn:
-    id: check
-    retryTapIfNoChange: true
+- runFlow: tap-check.yaml
+# Still idle on the old bundle ⇒ the tap never reached the app: tap again.
+- repeat:
+    times: 3
+    while:
+      visible:
+        id: status
+        text: "status:idle"
+      notVisible:
+        id: marker
+        text: "marker:${MARKER}"
+    commands:
+      - runFlow: tap-check.yaml
 - extendedWaitUntil:
     visible:
       id: marker
