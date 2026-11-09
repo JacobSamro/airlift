@@ -8,6 +8,7 @@ pub mod observability;
 pub mod orgs;
 pub mod patches;
 pub mod settings;
+pub mod sso;
 pub mod updates;
 pub mod users;
 

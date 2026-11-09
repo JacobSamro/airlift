@@ -52,6 +52,14 @@ const exportUrl = (format: string) => `/api/v1/orgs/${slug.value}/audit/export?f
 
       <UiCard
         v-if="canAdmin"
+        title="Single sign-on"
+        description="OIDC / SAML for this organization. It may only sign in this org's members (or create new ones), within its email domains."
+      >
+        <SsoProviders :org="slug" />
+      </UiCard>
+
+      <UiCard
+        v-if="canAdmin"
         title="Audit log"
         description="Who published, released, rolled back and changed access. Newest first."
       >

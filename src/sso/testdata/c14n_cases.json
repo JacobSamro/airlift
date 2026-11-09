@@ -1,0 +1,122 @@
+[
+ {
+  "xml": "<r xmlns=\"urn:d\" xmlns:a=\"urn:a\" xmlns:unused=\"urn:u\"><a:x a:k=\"1\" b=\"2\"><y>t&amp;&lt;&gt;\"'</y></a:x><z xmlns=\"\"><w/></z></r>",
+  "target": "r",
+  "inclusive": [],
+  "expected": "<r xmlns=\"urn:d\"><a:x xmlns:a=\"urn:a\" b=\"2\" a:k=\"1\"><y>t&amp;&lt;&gt;\"'</y></a:x><z xmlns=\"\"><w></w></z></r>"
+ },
+ {
+  "xml": "<r xmlns=\"urn:d\" xmlns:a=\"urn:a\" xmlns:unused=\"urn:u\"><a:x a:k=\"1\" b=\"2\"><y>t&amp;&lt;&gt;\"'</y></a:x><z xmlns=\"\"><w/></z></r>",
+  "target": "r",
+  "inclusive": [],
+  "expected": "<r xmlns=\"urn:d\"><a:x xmlns:a=\"urn:a\" b=\"2\" a:k=\"1\"><y>t&amp;&lt;&gt;\"'</y></a:x><z xmlns=\"\"><w></w></z></r>"
+ },
+ {
+  "xml": "<r xmlns=\"urn:d\" xmlns:a=\"urn:a\" xmlns:unused=\"urn:u\"><a:x a:k=\"1\" b=\"2\"><y>t&amp;&lt;&gt;\"'</y></a:x><z xmlns=\"\"><w/></z></r>",
+  "target": "x",
+  "inclusive": [],
+  "expected": "<a:x xmlns:a=\"urn:a\" b=\"2\" a:k=\"1\"><y xmlns=\"urn:d\">t&amp;&lt;&gt;\"'</y></a:x>"
+ },
+ {
+  "xml": "<r xmlns=\"urn:d\" xmlns:a=\"urn:a\" xmlns:unused=\"urn:u\"><a:x a:k=\"1\" b=\"2\"><y>t&amp;&lt;&gt;\"'</y></a:x><z xmlns=\"\"><w/></z></r>",
+  "target": "x",
+  "inclusive": [],
+  "expected": "<a:x xmlns:a=\"urn:a\" b=\"2\" a:k=\"1\"><y xmlns=\"urn:d\">t&amp;&lt;&gt;\"'</y></a:x>"
+ },
+ {
+  "xml": "<r xmlns=\"urn:d\" xmlns:a=\"urn:a\" xmlns:unused=\"urn:u\"><a:x a:k=\"1\" b=\"2\"><y>t&amp;&lt;&gt;\"'</y></a:x><z xmlns=\"\"><w/></z></r>",
+  "target": "z",
+  "inclusive": [],
+  "expected": "<z><w></w></z>"
+ },
+ {
+  "xml": "<r xmlns=\"urn:d\" xmlns:a=\"urn:a\" xmlns:unused=\"urn:u\"><a:x a:k=\"1\" b=\"2\"><y>t&amp;&lt;&gt;\"'</y></a:x><z xmlns=\"\"><w/></z></r>",
+  "target": "z",
+  "inclusive": [],
+  "expected": "<z><w></w></z>"
+ },
+ {
+  "xml": "<p:root xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><p:v xsi:type=\"xs:string\">a\tb</p:v><p:w attr=\"x&#9;y&#10;z\"/></p:root>",
+  "target": "root",
+  "inclusive": [],
+  "expected": "<p:root xmlns:p=\"urn:p\"><p:v xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"xs:string\">a\tb</p:v><p:w attr=\"x&#x9;y&#xA;z\"></p:w></p:root>"
+ },
+ {
+  "xml": "<p:root xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><p:v xsi:type=\"xs:string\">a\tb</p:v><p:w attr=\"x&#9;y&#10;z\"/></p:root>",
+  "target": "root",
+  "inclusive": [
+   "xs"
+  ],
+  "expected": "<p:root xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"><p:v xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"xs:string\">a\tb</p:v><p:w attr=\"x&#x9;y&#xA;z\"></p:w></p:root>"
+ },
+ {
+  "xml": "<p:root xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><p:v xsi:type=\"xs:string\">a\tb</p:v><p:w attr=\"x&#9;y&#10;z\"/></p:root>",
+  "target": "v",
+  "inclusive": [],
+  "expected": "<p:v xmlns:p=\"urn:p\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"xs:string\">a\tb</p:v>"
+ },
+ {
+  "xml": "<p:root xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><p:v xsi:type=\"xs:string\">a\tb</p:v><p:w attr=\"x&#9;y&#10;z\"/></p:root>",
+  "target": "v",
+  "inclusive": [
+   "xs"
+  ],
+  "expected": "<p:v xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"xs:string\">a\tb</p:v>"
+ },
+ {
+  "xml": "<p:root xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><p:v xsi:type=\"xs:string\">a\tb</p:v><p:w attr=\"x&#9;y&#10;z\"/></p:root>",
+  "target": "w",
+  "inclusive": [],
+  "expected": "<p:w xmlns:p=\"urn:p\" attr=\"x&#x9;y&#xA;z\"></p:w>"
+ },
+ {
+  "xml": "<p:root xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><p:v xsi:type=\"xs:string\">a\tb</p:v><p:w attr=\"x&#9;y&#10;z\"/></p:root>",
+  "target": "w",
+  "inclusive": [
+   "xs"
+  ],
+  "expected": "<p:w xmlns:p=\"urn:p\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" attr=\"x&#x9;y&#xA;z\"></p:w>"
+ },
+ {
+  "xml": "<a xmlns=\"urn:a\"><b xmlns=\"urn:b\"><c xmlns=\"urn:a\">x<![CDATA[<y>]]><?pi data?></c></b><!-- c --></a>",
+  "target": "a",
+  "inclusive": [],
+  "expected": "<a xmlns=\"urn:a\"><b xmlns=\"urn:b\"><c xmlns=\"urn:a\">x&lt;y&gt;<?pi data?></c></b></a>"
+ },
+ {
+  "xml": "<a xmlns=\"urn:a\"><b xmlns=\"urn:b\"><c xmlns=\"urn:a\">x<![CDATA[<y>]]><?pi data?></c></b><!-- c --></a>",
+  "target": "b",
+  "inclusive": [],
+  "expected": "<b xmlns=\"urn:b\"><c xmlns=\"urn:a\">x&lt;y&gt;<?pi data?></c></b>"
+ },
+ {
+  "xml": "<a xmlns=\"urn:a\"><b xmlns=\"urn:b\"><c xmlns=\"urn:a\">x<![CDATA[<y>]]><?pi data?></c></b><!-- c --></a>",
+  "target": "c",
+  "inclusive": [],
+  "expected": "<c xmlns=\"urn:a\">x&lt;y&gt;<?pi data?></c>"
+ },
+ {
+  "xml": "<doc><e  z=\"2\"   a=\"1\" xml:lang=\"en\">  ü — ✓ \n</e></doc>",
+  "target": "doc",
+  "inclusive": [],
+  "expected": "<doc><e a=\"1\" z=\"2\" xml:lang=\"en\">  ü — ✓ \n</e></doc>"
+ },
+ {
+  "xml": "<doc><e  z=\"2\"   a=\"1\" xml:lang=\"en\">  ü — ✓ \n</e></doc>",
+  "target": "doc",
+  "inclusive": [],
+  "expected": "<doc><e a=\"1\" z=\"2\" xml:lang=\"en\">  ü — ✓ \n</e></doc>"
+ },
+ {
+  "xml": "<doc><e  z=\"2\"   a=\"1\" xml:lang=\"en\">  ü — ✓ \n</e></doc>",
+  "target": "e",
+  "inclusive": [],
+  "expected": "<e a=\"1\" z=\"2\" xml:lang=\"en\">  ü — ✓ \n</e>"
+ },
+ {
+  "xml": "<doc><e  z=\"2\"   a=\"1\" xml:lang=\"en\">  ü — ✓ \n</e></doc>",
+  "target": "e",
+  "inclusive": [],
+  "expected": "<e a=\"1\" z=\"2\" xml:lang=\"en\">  ü — ✓ \n</e>"
+ }
+]

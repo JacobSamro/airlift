@@ -395,6 +395,13 @@ onMounted(() => {
         </ul>
       </UiCard>
 
+      <UiCard
+        title="Single sign-on (instance)"
+        description="OIDC / SAML identity providers trusted for every account in their email domains. Org admins can also add providers for their own org."
+      >
+        <SsoProviders />
+      </UiCard>
+
       <UiCard title="Users" description="Instance-wide accounts (admin only).">
         <template #header>
           <UiButton size="sm" @click="showAddUser = true"><UiIcon name="plus" :size="14" /> New user</UiButton>

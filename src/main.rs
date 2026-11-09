@@ -17,6 +17,7 @@ mod protocol;
 mod rate_limit;
 mod rollout;
 mod server;
+mod sso;
 mod state;
 mod storage;
 mod tls;

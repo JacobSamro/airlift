@@ -6,7 +6,31 @@ const router = useRouter();
 const route = useRoute();
 const login = ref("");
 const password = ref("");
-const error = ref(route.query.error === "oauth" ? "Google sign-in failed or was cancelled." : "");
+const error = ref(
+  route.query.error === "oauth"
+    ? "Google sign-in failed or was cancelled."
+    : route.query.error === "sso"
+      ? `Single sign-on failed: ${(route.query.message as string) ?? "unknown error"}`
+      : "",
+);
+
+// Enterprise SSO: route by the work email's domain to its IdP.
+const showSso = ref(false);
+const ssoEmail = ref("");
+const ssoBusy = ref(false);
+async function ssoSignIn() {
+  error.value = "";
+  ssoBusy.value = true;
+  try {
+    const p = await api.get<{ provider_id: string }>(
+      `/api/v1/auth/sso/discover?email=${encodeURIComponent(ssoEmail.value.trim())}`,
+    );
+    window.location.href = `/api/v1/auth/sso/${p.provider_id}/login`;
+  } catch {
+    error.value = "No single sign-on is set up for that email domain.";
+    ssoBusy.value = false;
+  }
+}
 const busy = ref(false);
 const googleEnabled = ref(false);
 
@@ -60,11 +84,21 @@ async function submit() {
         <UiButton type="submit" :disabled="busy">{{ busy ? "Signing in…" : "Sign in" }}</UiButton>
       </form>
 
+      <div class="my-4 flex items-center gap-3 text-xs text-muted-foreground">
+        <span class="h-px flex-1 bg-border" /> or <span class="h-px flex-1 bg-border" />
+      </div>
+      <form v-if="showSso" class="flex flex-col gap-2" @submit.prevent="ssoSignIn">
+        <UiInput v-model="ssoEmail" type="email" placeholder="you@company.com" required data-testid="sso-email" />
+        <UiButton type="submit" variant="outline" :disabled="ssoBusy">
+          {{ ssoBusy ? "Redirecting…" : "Continue with SSO" }}
+        </UiButton>
+      </form>
+      <UiButton v-else variant="outline" class="w-full" data-testid="sso-start" @click="showSso = true">
+        <UiIcon name="key" :size="16" /> Sign in with SSO
+      </UiButton>
+
       <template v-if="googleEnabled">
-        <div class="my-4 flex items-center gap-3 text-xs text-muted-foreground">
-          <span class="h-px flex-1 bg-border" /> or <span class="h-px flex-1 bg-border" />
-        </div>
-        <UiButton variant="outline" class="w-full" @click="googleSignIn">
+        <UiButton variant="outline" class="mt-2 w-full" @click="googleSignIn">
           <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
             <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.76h3.56c2.08-1.92 3.28-4.74 3.28-8.09z"/>
             <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.56-2.76c-.98.66-2.23 1.06-3.72 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23z"/>

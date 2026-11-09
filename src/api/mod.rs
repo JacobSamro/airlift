@@ -4,6 +4,7 @@
 pub mod apps;
 mod observability;
 pub mod publish;
+mod sso;
 
 use axum::{
     extract::{Path, Query, State},
@@ -33,6 +34,26 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/auth/providers", get(providers))
         .route("/api/v1/auth/google/login", get(google_login))
         .route("/api/v1/auth/google/callback", get(google_callback))
+        .route("/api/v1/auth/sso/discover", get(sso::discover))
+        .route("/api/v1/auth/sso/{id}/login", get(sso::login))
+        .route("/api/v1/auth/sso/{id}/callback", get(sso::oidc_callback))
+        .route("/api/v1/auth/sso/{id}/saml/acs", post(sso::saml_acs))
+        .route(
+            "/api/v1/auth/sso/{id}/saml/metadata",
+            get(sso::saml_metadata),
+        )
+        .route(
+            "/api/v1/sso/providers",
+            get(sso::list_instance).post(sso::create_instance),
+        )
+        .route(
+            "/api/v1/sso/providers/{id}",
+            axum::routing::patch(sso::update).delete(sso::delete),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/sso",
+            get(sso::list_org).post(sso::create_org),
+        )
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/orgs", get(list_orgs).post(create_org))
         .route("/api/v1/admin/orgs", get(list_all_orgs))
@@ -489,7 +510,11 @@ async fn google_callback_inner(
 }
 
 /// Create a new local account for an OAuth user (unusable random password).
-async fn provision_oauth_user(db: &db::Db, email: &str, name: &str) -> Result<crate::models::User> {
+pub(crate) async fn provision_oauth_user(
+    db: &db::Db,
+    email: &str,
+    name: &str,
+) -> Result<crate::models::User> {
     let base = sanitize_username(if name.trim().is_empty() { email } else { name });
     let username = unique_username(db, &base).await?;
     let random = format!("{}{}", crate::util::random_id(), crate::util::random_id());

@@ -2058,3 +2058,290 @@ async fn otlp_logs_and_metrics() {
     assert_eq!(series["series"][0]["sum"], 7.0, "{series}");
     assert_eq!(series["series"][0]["count"], 2);
 }
+
+/// A minimal OIDC provider for SSO tests: discovery, JWKS, and a token
+/// endpoint that signs an RS256 ID token for whatever identity the test set.
+struct MockIdp {
+    base: String,
+    claims: std::sync::Arc<std::sync::Mutex<Value>>,
+}
+
+async fn spawn_mock_idp() -> MockIdp {
+    use axum::{extract::State, routing::get, routing::post, Json, Router};
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::{SignatureEncoding, Signer};
+    use rsa::traits::PublicKeyParts;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+    let jwks = json!({ "keys": [{ "kty": "RSA", "kid": "k1", "use": "sig", "alg": "RS256",
+        "n": b64(&key.to_public_key().n().to_bytes_be()), "e": b64(&key.to_public_key().e().to_bytes_be()) }] });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let claims = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+    #[derive(Clone)]
+    struct S {
+        base: String,
+        jwks: Value,
+        claims: std::sync::Arc<std::sync::Mutex<Value>>,
+        signer: SigningKey<RsaSha256>,
+    }
+    let s = S {
+        base: base.clone(),
+        jwks,
+        claims: claims.clone(),
+        signer: SigningKey::<RsaSha256>::new(key),
+    };
+    let app = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get(|State(s): State<S>| async move {
+                Json(json!({ "issuer": s.base, "authorization_endpoint": format!("{}/authorize", s.base),
+                    "token_endpoint": format!("{}/token", s.base), "jwks_uri": format!("{}/jwks", s.base) }))
+            }),
+        )
+        .route("/jwks", get(|State(s): State<S>| async move { Json(s.jwks.clone()) }))
+        .route(
+            "/token",
+            post(|State(s): State<S>| async move {
+                let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+                let mut c = s.claims.lock().unwrap().clone();
+                c["iss"] = json!(s.base);
+                c["exp"] = json!(4_000_000_000i64);
+                let h = b64(json!({ "alg": "RS256", "kid": "k1" }).to_string().as_bytes());
+                let p = b64(c.to_string().as_bytes());
+                let sig = s.signer.sign(format!("{h}.{p}").as_bytes()).to_vec();
+                Json(json!({ "id_token": format!("{h}.{p}.{}", b64(&sig)), "token_type": "Bearer" }))
+            }),
+        )
+        .with_state(s);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    MockIdp { base, claims }
+}
+
+/// Run an SSO login for `email` through `provider_id`; returns the final
+/// redirect target and the browser (cookies).
+async fn sso_login(
+    ctx: &Ctx,
+    idp: &MockIdp,
+    provider_id: &str,
+    email: &str,
+    verified: bool,
+) -> (String, reqwest::Client) {
+    let browser = reqwest::Client::builder()
+        .cookie_store(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = browser
+        .get(format!("{}/api/v1/auth/sso/{provider_id}/login", ctx.base))
+        .send()
+        .await
+        .unwrap();
+    let loc = resp.headers()["location"].to_str().unwrap().to_string();
+    let url = reqwest::Url::parse(&loc).unwrap();
+    assert!(loc.starts_with(&idp.base), "{loc}");
+    let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(q["code_challenge_method"], "S256");
+    *idp.claims.lock().unwrap() = json!({ "aud": "airlift", "sub": email, "email": email,
+        "email_verified": verified, "name": "SSO User", "nonce": q["nonce"] });
+    let resp = browser
+        .get(format!("{}?code=c&state={}", q["redirect_uri"], q["state"]))
+        .send()
+        .await
+        .unwrap();
+    let to = resp.headers()["location"].to_str().unwrap().to_string();
+    (to, browser)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oidc_sso_login_and_account_rules() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    let idp = spawn_mock_idp().await;
+    let provider = |body: Value, path: &str| {
+        ctx.http
+            .post(format!("{}{path}", ctx.base))
+            .json(&body)
+            .send()
+    };
+    let oidc = |name: &str, domains: Value, auto: bool| {
+        json!({ "kind": "oidc", "name": name, "domains": domains, "auto_provision": auto,
+            "config": { "issuer": idp.base, "client_id": "airlift", "client_secret": "s3cret" } })
+    };
+    let me = |b: reqwest::Client| {
+        let base = ctx.base.clone();
+        async move {
+            b.get(format!("{base}/api/v1/auth/me"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    // Instance provider for example.com: signs in the existing admin.
+    let resp = provider(
+        oidc("Corp", json!(["example.com"]), false),
+        "/api/v1/sso/providers",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let inst: Value = resp.json().await.unwrap_or(Value::Null);
+    let _ = inst;
+    let list: Value = ctx
+        .http
+        .get(format!("{}/api/v1/sso/providers", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let inst_id = list["providers"][0]["id"].as_str().unwrap().to_string();
+    assert!(list["providers"][0]["config"]["client_secret"].is_null());
+    assert_eq!(list["providers"][0]["has_client_secret"], true);
+
+    let found: Value = reqwest::get(format!(
+        "{}/api/v1/auth/sso/discover?email=a@EXAMPLE.com",
+        ctx.base
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(found["provider_id"], inst_id.as_str());
+
+    let (to, browser) = sso_login(&ctx, &idp, &inst_id, "admin@example.com", true).await;
+    assert_eq!(to, "/");
+    assert_eq!(me(browser).await, 200);
+    // Unverified email → refused.
+    let (to, _) = sso_login(&ctx, &idp, &inst_id, "admin@example.com", false).await;
+    assert!(to.starts_with("/login?error=sso"), "{to}");
+    // A replayed state is refused (single use).
+    {
+        let b = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let loc = b
+            .get(format!("{}/api/v1/auth/sso/{inst_id}/login", ctx.base))
+            .send()
+            .await
+            .unwrap()
+            .headers()["location"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let q: std::collections::HashMap<_, _> = reqwest::Url::parse(&loc)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect();
+        *idp.claims.lock().unwrap() = json!({ "aud": "airlift", "sub": "a", "email": "admin@example.com",
+            "email_verified": true, "nonce": q["nonce"] });
+        let cb = format!("{}?code=c&state={}", q["redirect_uri"], q["state"]);
+        let first = b.get(&cb).send().await.unwrap();
+        assert_eq!(first.headers()["location"], "/");
+        let again = b.get(&cb).send().await.unwrap();
+        assert!(again.headers()["location"]
+            .to_str()
+            .unwrap()
+            .starts_with("/login?error=sso"));
+    }
+    // Unknown user without auto-provision → refused.
+    let (to, _) = sso_login(&ctx, &idp, &inst_id, "nobody@example.com", true).await;
+    assert!(to.starts_with("/login?error=sso"), "{to}");
+
+    // Org provider for corp.test with auto-provision: creates the user and
+    // makes them an org member; it can't sign in the instance admin.
+    let resp = provider(oidc("Acme IdP", json!([]), true), "/api/v1/orgs/acme/sso")
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "org providers must list domains");
+    let resp = provider(
+        oidc("Acme IdP", json!(["corp.test", "example.com"]), true),
+        "/api/v1/orgs/acme/sso",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 201);
+    let org_id = resp.json::<Value>().await.unwrap()["provider"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (to, _) = sso_login(&ctx, &idp, &org_id, "admin@example.com", true).await;
+    assert!(
+        to.starts_with("/login?error=sso"),
+        "instance admin via org IdP: {to}"
+    );
+    let (to, browser) = sso_login(&ctx, &idp, &org_id, "new.dev@corp.test", true).await;
+    assert_eq!(to, "/");
+    let me_body: Value = browser
+        .get(format!("{}/api/v1/auth/me", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me_body["user"]["email"], "new.dev@corp.test");
+    assert_eq!(me_body["orgs"][0]["slug"], "acme");
+    assert_eq!(me_body["orgs"][0]["role"], "member");
+    // Out-of-domain email via the org provider → refused.
+    let (to, _) = sso_login(&ctx, &idp, &org_id, "x@other.test", true).await;
+    assert!(to.starts_with("/login?error=sso"), "{to}");
+
+    // SAML ACS refuses unsolicited / forged responses.
+    let resp = provider(
+        json!({ "kind": "saml", "name": "SAML", "domains": ["saml.test"], "config": {
+            "idp_sso_url": "https://idp.saml.test/sso",
+            "idp_cert_pem": include_str!("../src/sso/testdata/idp.crt") } }),
+        "/api/v1/sso/providers",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let saml_id = resp.json::<Value>().await.unwrap()["provider"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let md = reqwest::get(format!(
+        "{}/api/v1/auth/sso/{saml_id}/saml/metadata",
+        ctx.base
+    ))
+    .await
+    .unwrap()
+    .text()
+    .await
+    .unwrap();
+    assert!(md.contains(&format!("/api/v1/auth/sso/{saml_id}/saml/acs")));
+    let browser = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let forged = base64::engine::general_purpose::STANDARD.encode(include_str!(
+        "../src/sso/testdata/saml_assertion_signed.xml"
+    ));
+    let resp = browser
+        .post(format!("{}/api/v1/auth/sso/{saml_id}/saml/acs", ctx.base))
+        .form(&[("SAMLResponse", forged.as_str()), ("RelayState", "made-up")])
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.headers()["location"]
+        .to_str()
+        .unwrap()
+        .starts_with("/login?error=sso"));
+    let resp = browser
+        .get(format!("{}/api/v1/auth/sso/{saml_id}/login", ctx.base))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.headers()["location"]
+        .to_str()
+        .unwrap()
+        .starts_with("https://idp.saml.test/sso?SAMLRequest="));
+}

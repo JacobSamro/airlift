@@ -35,6 +35,7 @@ dependencies = [
  "clap",
  "dashmap",
  "figment",
+ "flate2",
  "futures",
  "governor",
  "hex",
@@ -46,7 +47,9 @@ dependencies = [
  "metrics-exporter-prometheus",
  "mimalloc",
  "mime_guess",
+ "p256",
  "qbsdiff",
+ "quick-xml",
  "rand 0.8.6",
  "rcgen",
  "reqwest",
@@ -3096,6 +3099,15 @@ dependencies = [
  "wasi",
  "web-sys",
  "winapi",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
