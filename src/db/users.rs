@@ -176,14 +176,15 @@ pub async fn create_pat(
     scope_org_id: Option<&str>,
     scope_app_id: Option<&str>,
     max_perm: &str,
+    allowed_ips: Option<&str>,
 ) -> Result<String> {
     let token = pat::generate();
     let id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO personal_access_tokens
             (id, user_id, name, token_prefix, token_hash, created_at,
-             scope_kind, scope_org_id, scope_app_id, max_perm)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             scope_kind, scope_org_id, scope_app_id, max_perm, allowed_ips)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(user_id)
@@ -195,6 +196,7 @@ pub async fn create_pat(
     .bind(scope_org_id)
     .bind(scope_app_id)
     .bind(max_perm)
+    .bind(allowed_ips)
     .execute(db)
     .await?;
     Ok(token.plaintext)
@@ -211,6 +213,8 @@ pub struct PatRow {
     pub scope: String,
     /// Permission cap: "pull", "push", or "admin".
     pub max_perm: String,
+    /// IP allowlist (comma-separated CIDRs), if any.
+    pub allowed_ips: Option<String>,
 }
 
 pub async fn list_pats(db: &Db, user_id: &str) -> Result<Vec<PatRow>> {
@@ -225,10 +229,11 @@ pub async fn list_pats(db: &Db, user_id: &str) -> Result<Vec<PatRow>> {
         Option<String>,
         Option<String>,
         String,
+        Option<String>,
     );
     let rows = sqlx::query_as::<_, Row>(
         "SELECT p.id, p.name, p.token_prefix, p.last_used_at, p.created_at,
-                p.scope_kind, o.slug, a.slug, ao.slug, p.max_perm
+                p.scope_kind, o.slug, a.slug, ao.slug, p.max_perm, p.allowed_ips
          FROM personal_access_tokens p
          LEFT JOIN orgs o ON o.id = p.scope_org_id
          LEFT JOIN apps a ON a.id = p.scope_app_id
@@ -252,6 +257,7 @@ pub async fn list_pats(db: &Db, user_id: &str) -> Result<Vec<PatRow>> {
                 app_slug,
                 app_org_slug,
                 max_perm,
+                allowed_ips,
             )| {
                 let scope = match kind.as_str() {
                     "org" => org_slug.unwrap_or_else(|| "all".into()),
@@ -269,6 +275,7 @@ pub async fn list_pats(db: &Db, user_id: &str) -> Result<Vec<PatRow>> {
                     created_at,
                     scope,
                     max_perm,
+                    allowed_ips,
                 }
             },
         )
@@ -288,10 +295,11 @@ pub async fn delete_pat(db: &Db, user_id: &str, id: &str) -> Result<()> {
 /// Resolve a PAT plaintext to its owning user, resource scope, and permission
 /// cap, updating last-used and honoring expiry.
 #[allow(dead_code)]
-pub async fn user_for_pat(
-    db: &Db,
-    plaintext: &str,
-) -> Result<Option<(User, TokenScope, Permission)>> {
+/// A resolved PAT: its owner, scope, cap, and IP allowlist (comma-separated,
+/// `None` = anywhere).
+pub type PatGrant = (User, TokenScope, Permission, Option<String>);
+
+pub async fn user_for_pat(db: &Db, plaintext: &str) -> Result<Option<PatGrant>> {
     let h = pat::hash(plaintext);
     let now = now_rfc3339();
     type Row = (
@@ -305,10 +313,11 @@ pub async fn user_for_pat(
         Option<String>, // p.scope_org_id
         Option<String>, // p.scope_app_id
         String,         // p.max_perm
+        Option<String>, // p.allowed_ips
     );
     let row = sqlx::query_as::<_, Row>(
         "SELECT u.id, u.email, u.username, u.password_hash, u.is_admin, u.created_at,
-                p.scope_kind, p.scope_org_id, p.scope_app_id, p.max_perm
+                p.scope_kind, p.scope_org_id, p.scope_app_id, p.max_perm, p.allowed_ips
          FROM users u
          JOIN personal_access_tokens p ON p.user_id = u.id
          WHERE p.token_hash = ? AND (p.expires_at IS NULL OR p.expires_at > ?)",
@@ -329,6 +338,7 @@ pub async fn user_for_pat(
         org_id,
         app_id,
         max_perm,
+        allowed_ips,
     )) = row
     else {
         return Ok(None);
@@ -353,5 +363,5 @@ pub async fn user_for_pat(
         _ => TokenScope::All,
     };
     let cap = Permission::parse(&max_perm).unwrap_or(Permission::Admin);
-    Ok(Some((user, scope, cap)))
+    Ok(Some((user, scope, cap, allowed_ips)))
 }

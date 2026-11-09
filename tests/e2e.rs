@@ -1698,3 +1698,54 @@ async fn custom_roles_and_branch_protection() {
     .unwrap();
     assert_eq!(resp.status(), 400);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn token_ip_allowlist() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    let make = |ips: Value| {
+        ctx.http
+            .post(format!("{}/api/v1/tokens", ctx.base))
+            .json(&json!({ "name": "ci", "org": "acme", "permission": "read", "allowed_ips": ips }))
+            .send()
+    };
+    let use_token = |tok: String| {
+        reqwest::Client::new()
+            .get(format!("{}/api/v1/orgs/acme/apps", ctx.base))
+            .bearer_auth(tok)
+            .send()
+    };
+    let tok = |v: Value| v["token"].as_str().unwrap().to_string();
+
+    let elsewhere: Value = make(json!(["10.0.0.0/8"]))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(use_token(tok(elsewhere)).await.unwrap().status(), 403);
+    let here: Value = make(json!(["127.0.0.1", "::1"]))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(use_token(tok(here)).await.unwrap().status(), 200);
+    assert_eq!(make(json!(["not-an-ip"])).await.unwrap().status(), 400);
+
+    let list: Value = ctx
+        .http
+        .get(format!("{}/api/v1/tokens", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(list["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["allowed_ips"] == "10.0.0.0/8"));
+}

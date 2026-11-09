@@ -31,8 +31,16 @@ fn is_guarded(path: &str) -> bool {
 /// `trust_proxy` is set (i.e. a trusted proxy populates them); otherwise the
 /// real peer socket address is used so a client can't spoof a fresh key.
 fn client_ip(req: &Request, trust_proxy: bool) -> String {
+    client_ip_from(req.headers(), req.extensions(), trust_proxy)
+}
+
+/// [`client_ip`] from request parts (also used for PAT IP allowlists).
+pub(crate) fn client_ip_from(
+    h: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+    trust_proxy: bool,
+) -> String {
     if trust_proxy {
-        let h = req.headers();
         if let Some(xff) = h.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             // Take the LAST non-empty hop: proxies append the peer they saw,
             // so the rightmost entry was written by our trusted proxy while
@@ -50,7 +58,7 @@ fn client_ip(req: &Request, trust_proxy: bool) -> String {
             }
         }
     }
-    req.extensions()
+    extensions
         .get::<ConnectInfo<std::net::SocketAddr>>()
         .map(|c| c.0.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string())

@@ -1,6 +1,7 @@
 //! Authentication: password hashing, PATs, RBAC, sessions, and the request
 //! extractors that enforce them.
 
+pub mod ipallow;
 pub mod oauth;
 pub mod password;
 pub mod pat;
@@ -91,9 +92,23 @@ impl FromRequestParts<AppState> for ApiUser {
             .and_then(|v| v.to_str().ok())
             .and_then(parse_bearer)
         {
-            let (user, scope, cap) = db::users::user_for_pat(state.db(), bearer)
+            let (user, scope, cap, allowed_ips) = db::users::user_for_pat(state.db(), bearer)
                 .await?
                 .ok_or(Error::Unauthorized)?;
+            // Per-token IP allowlist, checked against the same client IP the
+            // rate limiter uses (proxy hop only when trust_proxy is on).
+            if let Some(allowed) = allowed_ips.filter(|s| !s.is_empty()) {
+                let ip = crate::rate_limit::client_ip_from(
+                    &parts.headers,
+                    &parts.extensions,
+                    state.config().server.trust_proxy,
+                )
+                .parse()
+                .ok();
+                if !ipallow::allows(&allowed, ip) {
+                    return Err(Error::Forbidden);
+                }
+            }
             return Ok(ApiUser { user, scope, cap });
         }
         let SessionUser(user) = SessionUser::from_request_parts(parts, state).await?;

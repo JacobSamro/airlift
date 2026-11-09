@@ -931,6 +931,10 @@ struct CreateTokenReq {
     /// must never silently become an all-scope token.
     #[serde(default)]
     scope: Option<String>,
+    /// Optional IP allowlist: addresses or CIDR ranges the token may be used
+    /// from. Empty / absent = anywhere.
+    #[serde(default)]
+    allowed_ips: Option<Vec<String>>,
 }
 
 async fn create_token(
@@ -982,6 +986,19 @@ async fn create_token(
         }
     };
 
+    // Optional IP allowlist (IPs / CIDRs), stored normalized.
+    let allowed_ips = match req.allowed_ips.as_deref() {
+        None | Some([]) => None,
+        Some(list) => Some(
+            crate::auth::ipallow::parse_list(list)
+                .ok_or_else(|| Error::bad_request("allowed_ips: invalid IP or CIDR"))?
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    };
+
     let plaintext = db::users::create_pat(
         state.db(),
         &user.id,
@@ -990,6 +1007,7 @@ async fn create_token(
         org_id.as_deref(),
         app_id.as_deref(),
         max_perm,
+        allowed_ips.as_deref(),
     )
     .await?;
     Ok(json_ok(

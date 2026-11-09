@@ -103,6 +103,7 @@ export interface Token {
   scope: string;
   /** Permission cap: "read", "publish", or "admin". */
   max_perm: string;
+  allowed_ips: string | null;
 }
 
 export function useApi() {

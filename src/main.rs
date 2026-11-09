@@ -253,6 +253,7 @@ async fn run_admin(pool: &db::Db, cmd: AdminCommand) -> anyhow::Result<()> {
                 org_id.as_deref(),
                 app_id.as_deref(),
                 &permission,
+                None,
             )
             .await?;
             println!("{token}");

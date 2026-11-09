@@ -24,6 +24,8 @@ const scopeType = ref<"all" | "org" | "app">("all");
 const scopeOrg = ref("");
 const scopeApp = ref("");
 const scopePerm = ref<"admin" | "publish" | "read">("admin");
+// Optional IP allowlist: comma/space-separated addresses or CIDR ranges.
+const allowedIps = ref("");
 
 const PERM_LABEL: Record<string, string> = {
   admin: "full",
@@ -72,15 +74,18 @@ onMounted(load);
 async function create() {
   // Always send the scope kind explicitly: the server rejects a narrow scope
   // with missing org/app instead of minting an all-scope token.
-  const body: Record<string, string> = {
+  const body: Record<string, unknown> = {
     name: newName.value,
     permission: scopePerm.value,
     scope: scopeType.value,
   };
+  const ips = allowedIps.value.split(/[\s,]+/).filter(Boolean);
+  if (ips.length) body.allowed_ips = ips;
   if (scopeType.value !== "all" && scopeOrg.value) body.org = scopeOrg.value;
   if (scopeType.value === "app" && scopeApp.value.trim()) body.app = scopeApp.value.trim();
   const res = await api.post<{ token: string }>("/api/v1/tokens", body);
   created.value = res.token;
+  allowedIps.value = "";
   newName.value = "";
   await load();
 }
@@ -151,6 +156,9 @@ function closeCreate() {
               <UiBadge :variant="t.scope === 'all' ? 'default' : 'outline'">
                 {{ t.scope === "all" ? "all access" : t.scope }}
               </UiBadge>
+              <UiBadge v-if="t.allowed_ips" variant="outline" :title="`Usable only from ${t.allowed_ips}`">
+                <UiIcon name="shield" :size="12" /> {{ t.allowed_ips }}
+              </UiBadge>
             </td>
             <td class="px-3 py-3 text-muted-foreground">{{ PERM_LABEL[t.max_perm] || t.max_perm }}</td>
             <td class="px-3 py-3 font-mono text-xs text-muted-foreground">{{ t.token_prefix }}…</td>
@@ -209,6 +217,14 @@ function closeCreate() {
             </SelectContent>
           </Select>
           <p class="text-xs text-muted-foreground">Caps the token below your own access; never grants more.</p>
+        </div>
+
+        <div class="flex flex-col gap-1.5">
+          <label class="text-sm font-medium">Allowed IPs <span class="text-muted-foreground">(optional)</span></label>
+          <UiInput v-model="allowedIps" placeholder="203.0.113.7, 10.0.0.0/8" data-testid="token-ips" />
+          <p class="text-xs text-muted-foreground">
+            Addresses or CIDR ranges the token may be used from (e.g. your CI egress). Empty = anywhere.
+          </p>
         </div>
 
         <div v-if="scopeType !== 'all'" class="flex flex-col gap-1.5">
