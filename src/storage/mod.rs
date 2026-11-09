@@ -158,6 +158,24 @@ impl Storage {
         Ok(data.into_bytes().to_vec())
     }
 
+    /// Open an object as a streaming response body (plus its length when
+    /// known), without buffering it. A missing object fails here, before any
+    /// bytes are sent, so callers can still fall back.
+    pub async fn get_stream(&self, key: &str) -> Result<(Option<i64>, axum::body::Body)> {
+        let out = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| map_s3("get", e))?;
+        let len = out.content_length();
+        let reader = out.body.into_async_read();
+        let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(reader));
+        Ok((len, body))
+    }
+
     pub async fn delete(&self, key: &str) -> Result<()> {
         self.client
             .delete_object()

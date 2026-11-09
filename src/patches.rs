@@ -77,7 +77,9 @@ pub async fn maybe_serve_patch(
     match db::patches::find(state.db(), &from_update.id, &to_id).await? {
         Some(p) if p.status == "ready" => {
             let key = Storage::patch_key(&app.org_id, &from_launch.sha256, &to_launch.sha256);
-            let body = match state.storage().get(&key).await {
+            // Stream the patch straight from storage rather than buffering
+            // the whole object per request.
+            let (len, body) = match state.storage().get_stream(&key).await {
                 Ok(b) => b,
                 Err(e) => {
                     // A lost object must not strand devices on 226 errors —
@@ -88,19 +90,22 @@ pub async fn maybe_serve_patch(
                 }
             };
             metrics::counter!("airlift_patch_served_total", "app" => app.slug.clone()).increment(1);
-            Ok(Some(
-                (
-                    StatusCode::IM_USED,
-                    [
-                        ("IM", "bsdiff".to_string()),
-                        ("expo-base-update-id", from_update.id.clone()),
-                        ("content-type", "application/octet-stream".to_string()),
-                        ("cache-control", "private, max-age=0".to_string()),
-                    ],
-                    body,
-                )
-                    .into_response(),
-            ))
+            let mut resp = (
+                StatusCode::IM_USED,
+                [
+                    ("IM", "bsdiff".to_string()),
+                    ("expo-base-update-id", from_update.id.clone()),
+                    ("content-type", "application/octet-stream".to_string()),
+                    ("cache-control", "private, max-age=0".to_string()),
+                ],
+                body,
+            )
+                .into_response();
+            if let Some(len) = len.or(p.size) {
+                resp.headers_mut()
+                    .insert(axum::http::header::CONTENT_LENGTH, len.into());
+            }
+            Ok(Some(resp))
         }
         Some(_) => Ok(None), // queued / generating / failed / not_beneficial
         None => {
