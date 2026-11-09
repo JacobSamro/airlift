@@ -788,3 +788,93 @@ async fn publish_requires_a_capable_token() {
         .unwrap();
     assert_eq!(resp.status(), 401);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn org_admins_cannot_take_over_ownership() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    let resp = ctx
+        .http
+        .post(format!("{}/api/v1/users", ctx.base))
+        .json(&json!({ "email": "eve@example.com", "username": "eve", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let resp = ctx
+        .http
+        .post(format!("{}/api/v1/orgs/acme/members", ctx.base))
+        .json(&json!({ "login": "eve", "role": "admin" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let members: Value = ctx
+        .http
+        .get(format!("{}/api/v1/orgs/acme/members", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id_of = |name: &str| {
+        members["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["username"] == name)
+            .unwrap()["user_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (eve_id, owner_id) = (id_of("eve"), id_of("admin"));
+
+    let eve = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .unwrap();
+    let resp = eve
+        .post(format!("{}/api/v1/auth/login", ctx.base))
+        .json(&json!({ "login": "eve", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Self-promotion to owner, and removing/demoting the owner: forbidden.
+    let resp = eve
+        .post(format!("{}/api/v1/orgs/acme/members/{eve_id}", ctx.base))
+        .json(&json!({ "role": "owner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let resp = eve
+        .delete(format!("{}/api/v1/orgs/acme/members/{owner_id}", ctx.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let resp = eve
+        .post(format!("{}/api/v1/orgs/acme/members", ctx.base))
+        .json(&json!({ "login": "admin", "role": "member" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // The last owner can't demote themselves either.
+    let resp = ctx
+        .http
+        .post(format!("{}/api/v1/orgs/acme/members/{owner_id}", ctx.base))
+        .json(&json!({ "role": "admin" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}

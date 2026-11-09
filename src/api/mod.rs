@@ -155,6 +155,37 @@ pub(crate) async fn member_of(
     Ok((org, role))
 }
 
+/// Guard for membership changes by an org admin/owner (`actor_role`):
+/// only owners (or instance admins) may grant the owner role or touch an
+/// existing owner's membership, and the last owner can't be demoted/removed.
+/// `new_role` is `None` for a removal.
+async fn guard_member_change(
+    state: &AppState,
+    org: &db::orgs::Org,
+    actor: &crate::models::User,
+    actor_role: OrgRole,
+    target_user_id: &str,
+    new_role: Option<OrgRole>,
+) -> Result<()> {
+    let actor_is_owner = actor_role == OrgRole::Owner || actor.is_admin;
+    let target_role = db::orgs::org_role(state.db(), &org.id, target_user_id).await?;
+    let touches_owner = new_role == Some(OrgRole::Owner) || target_role == Some(OrgRole::Owner);
+    if touches_owner && !actor_is_owner {
+        return Err(Error::Forbidden);
+    }
+    if target_role == Some(OrgRole::Owner) && new_role != Some(OrgRole::Owner) {
+        let owners = db::orgs::list_members(state.db(), &org.id)
+            .await?
+            .into_iter()
+            .filter(|m| m.role == OrgRole::Owner.as_str())
+            .count();
+        if owners <= 1 {
+            return Err(Error::bad_request("an org must keep at least one owner"));
+        }
+    }
+    Ok(())
+}
+
 /// Like [`member_of`] but requires an admin/owner role.
 pub(crate) async fn admin_of(
     state: &AppState,
@@ -569,11 +600,12 @@ async fn add_member(
     Path(slug): Path<String>,
     Json(req): Json<AddMemberReq>,
 ) -> Result<Response> {
-    let (org, _) = admin_of(&state, &user.id, &slug).await?;
+    let (org, actor_role) = admin_of(&state, &user.id, &slug).await?;
     let role = OrgRole::parse(&req.role).ok_or_else(|| Error::bad_request("invalid role"))?;
     let target = db::users::find_by_login(state.db(), &req.login)
         .await?
         .ok_or_else(|| Error::bad_request("no such user"))?;
+    guard_member_change(&state, &org, &user, actor_role, &target.id, Some(role)).await?;
     db::orgs::add_org_member(state.db(), &org.id, &target.id, role).await?;
     db::audit::record(
         state.db(),
@@ -599,8 +631,9 @@ async fn set_role(
     Path((slug, user_id)): Path<(String, String)>,
     Json(req): Json<SetRoleReq>,
 ) -> Result<Response> {
-    let (org, _) = admin_of(&state, &user.id, &slug).await?;
+    let (org, actor_role) = admin_of(&state, &user.id, &slug).await?;
     let role = OrgRole::parse(&req.role).ok_or_else(|| Error::bad_request("invalid role"))?;
+    guard_member_change(&state, &org, &user, actor_role, &user_id, Some(role)).await?;
     db::orgs::set_member_role(state.db(), &org.id, &user_id, role).await?;
     Ok(json_ok(json!({ "ok": true })))
 }
@@ -610,7 +643,8 @@ async fn remove_member(
     SessionUser(user): SessionUser,
     Path((slug, user_id)): Path<(String, String)>,
 ) -> Result<Response> {
-    let (org, _) = admin_of(&state, &user.id, &slug).await?;
+    let (org, actor_role) = admin_of(&state, &user.id, &slug).await?;
+    guard_member_change(&state, &org, &user, actor_role, &user_id, None).await?;
     db::orgs::remove_member(state.db(), &org.id, &user_id).await?;
     db::audit::record(
         state.db(),
