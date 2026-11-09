@@ -268,12 +268,34 @@ pub async fn unreferenced_assets(db: &Db, cutoff: &str) -> Result<Vec<(String, S
     Ok(rows)
 }
 
-pub async fn delete_asset(db: &Db, asset_id: &str) -> Result<()> {
-    sqlx::query("DELETE FROM assets WHERE id = ?")
+/// Delete an asset row only if it is STILL unreferenced and older than
+/// `cutoff` (re-checked atomically, so a publish that reused it after the GC
+/// listing wins). Returns whether the row was deleted — only then may the
+/// object be removed from storage.
+pub async fn delete_asset_if_unreferenced(db: &Db, asset_id: &str, cutoff: &str) -> Result<bool> {
+    let res = sqlx::query(
+        "DELETE FROM assets
+         WHERE id = ?1 AND created_at < ?2
+           AND NOT EXISTS (SELECT 1 FROM update_assets ua WHERE ua.asset_id = ?1)
+           AND NOT EXISTS (SELECT 1 FROM updates u WHERE u.launch_asset_id = ?1)",
+    )
+    .bind(asset_id)
+    .bind(cutoff)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// Refresh an asset's `created_at` when a publish reuses it, so the GC grace
+/// window protects it until the publish commits. Returns false if the row is
+/// gone (collected meanwhile) and the caller must re-upload.
+pub async fn touch_asset(db: &Db, asset_id: &str) -> Result<bool> {
+    let res = sqlx::query("UPDATE assets SET created_at = ? WHERE id = ?")
+        .bind(now_rfc3339())
         .bind(asset_id)
         .execute(db)
         .await?;
-    Ok(())
+    Ok(res.rows_affected() == 1)
 }
 
 // ───────────────────────── update groups / updates ─────────────────────────

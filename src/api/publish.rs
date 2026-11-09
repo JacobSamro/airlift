@@ -332,7 +332,10 @@ async fn store_asset(
 ) -> Result<db::updates::Asset> {
     let sha256 = hex::encode(Sha256::digest(&bytes));
     if let Some(existing) = db::updates::find_asset(state.db(), org_id, &sha256).await? {
-        return Ok(existing);
+        // Re-arm the GC grace window; if GC took the row meanwhile, upload.
+        if db::updates::touch_asset(state.db(), &existing.id).await? {
+            return Ok(existing);
+        }
     }
     let key = crate::storage::Storage::asset_key(org_id, &sha256);
     let size = bytes.len() as i64;
