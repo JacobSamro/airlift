@@ -91,7 +91,7 @@ for p in "$PORT" "$S3_PORT"; do
 done
 "$S3_STUB_BIN" "127.0.0.1:$S3_PORT" >"$WORK/s3.log" 2>&1 &
 PIDS+=($!)
-RUST_LOG="${RUST_LOG:-info}" \
+RUST_LOG="${RUST_LOG:-info,tower_http=debug}" \
   AIRLIFT_DATABASE__PATH="$WORK/airlift.db" \
   AIRLIFT_SERVER__HTTP_ADDR="127.0.0.1:$PORT" \
   AIRLIFT_SERVER__PUBLIC_URL="$SERVER" \
@@ -175,8 +175,28 @@ flow() { # flow-file KEY=VAL...
   for kv in "$@"; do env_args+=(-e "$kv"); done
   log "[$STEP] maestro $file $*"
   if [ "${E2E_DRY_RUN:-}" = 1 ]; then return 0; fi
-  maestro ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} test --debug-output "$WORK/maestro/$STEP-${file%.yaml}" \
-    ${env_args[@]+"${env_args[@]}"} "$HERE/flows/$file"
+  if ! maestro ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} test --debug-output "$WORK/maestro/$STEP-${file%.yaml}" \
+    ${env_args[@]+"${env_args[@]}"} "$HERE/flows/$file"; then
+    device_diagnostics
+    die "step $STEP ($file $*) failed"
+  fi
+}
+# On a failed step: print what the app shows (status carries the
+# expo-updates error) and save the device log next to the server logs.
+device_diagnostics() {
+  echo "---- app screen (key:value labels) ----"
+  maestro ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} hierarchy 2>/dev/null \
+    | grep -oE '(marker|origin|update-id|channel|status):[^"]*' | sort -u || true
+  if [ "$PLATFORM" = android ]; then
+    adb logcat -d >"$WORK/device.log" 2>&1 || true
+    echo "---- device log (expo-updates, tail) ----"
+    grep -iE 'expo|updates|ReactNativeJS' "$WORK/device.log" | tail -n 60 || true
+  else
+    xcrun simctl spawn "$UDID" log show --last 15m --style compact \
+      --predicate 'process CONTAINS "airlift" OR subsystem CONTAINS "expo"' >"$WORK/device.log" 2>&1 || true
+    echo "---- device log (expo-updates, tail) ----"
+    grep -iE 'expo|update|error|ATS|App Transport' "$WORK/device.log" | tail -n 60 || true
+  fi
 }
 publish() { # marker
   sed "s/MARKER = '.*'/MARKER = '$1'/" "$WORK/marker.js.orig" >"$APP/marker.js"
@@ -209,6 +229,6 @@ publish v4
 flow update.yaml MARKER=v4 ORIGIN=update
 
 log "server-side counters"
-curl -fsS "$SERVER/metrics" | grep -E '^airlift_(manifest|asset|patch)' || true
+curl -fsS -b "$JAR" "$SERVER/metrics" | grep -E '^airlift_(manifest|asset|patch)' || true
 
 log "PASS ($PLATFORM)"
