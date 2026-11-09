@@ -392,6 +392,26 @@ pub async fn update_channel(
         None => None,
     };
     db::updates::update_channel(state.db(), &ch.id, branch_id.as_deref(), req.auto_release).await?;
+    // Repointing serves the new branch's heads right away (the manifest reads
+    // `channel_releases`, not `branch_id`). Runtimes the new branch has never
+    // published lose their pointer rather than keep serving the old branch.
+    if let Some(new_branch) = branch_id
+        .as_deref()
+        .filter(|b| ch.branch_id.as_deref() != Some(*b))
+    {
+        let runtimes = db::updates::branch_runtime_versions(state.db(), new_branch).await?;
+        for (rv, _, _) in db::updates::releases_for_channel(state.db(), &ch.id).await? {
+            if !runtimes.contains(&rv) {
+                db::updates::delete_channel_release(state.db(), &ch.id, &rv).await?;
+            }
+        }
+        for rv in runtimes {
+            if let Some(head) = db::updates::head_group(state.db(), new_branch, &rv).await? {
+                let head = db::updates::fresh_for_channel(state.db(), &ch.id, &head).await?;
+                db::updates::set_channel_release(state.db(), &ch.id, &rv, &head.id).await?;
+            }
+        }
+    }
     db::audit::record(
         state.db(),
         Some(&caller.user.id),

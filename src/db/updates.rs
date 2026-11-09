@@ -719,6 +719,29 @@ pub async fn channel_release(
     Ok(g)
 }
 
+/// Runtime versions that have at least one group on a branch.
+pub async fn branch_runtime_versions(db: &Db, branch_id: &str) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT DISTINCT runtime_version FROM update_groups WHERE branch_id = ?")
+            .bind(branch_id)
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().map(|(rv,)| rv).collect())
+}
+
+pub async fn delete_channel_release(
+    db: &Db,
+    channel_id: &str,
+    runtime_version: &str,
+) -> Result<()> {
+    sqlx::query("DELETE FROM channel_releases WHERE channel_id = ? AND runtime_version = ?")
+        .bind(channel_id)
+        .bind(runtime_version)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// All release pointers for a channel (dashboard view).
 pub async fn releases_for_channel(
     db: &Db,

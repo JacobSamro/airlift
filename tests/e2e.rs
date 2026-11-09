@@ -425,6 +425,27 @@ async fn gated_channels_and_promotion_flow() {
     let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
     let m = verified_part(&ctx, resp, "manifest").await;
     assert_eq!(m["id"].as_str().unwrap(), main_update);
+
+    // Repointing production at another branch serves that branch's head at
+    // once, without waiting for the next publish there.
+    let (status, _) = publish(&ctx, "hotfix", "1.0.0", export_zip(&["ios"], "h1")).await;
+    assert_eq!(status, 201);
+    let resp = manifest_request(&ctx, "hotfix", "1.0.0", "ios", "1", None).await;
+    let hotfix = verified_part(&ctx, resp, "manifest").await;
+    let resp = ctx
+        .http
+        .patch(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/channels/production",
+            ctx.base
+        ))
+        .json(&json!({ "branch": "hotfix" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
+    let m = verified_part(&ctx, resp, "manifest").await;
+    assert_eq!(m["launchAsset"]["hash"], hotfix["launchAsset"]["hash"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
