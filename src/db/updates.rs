@@ -430,24 +430,6 @@ pub async fn groups_for_branch(
     Ok(g)
 }
 
-/// The group published immediately before `group_id` on the same
-/// branch+runtime — the rollback target.
-pub async fn previous_group(db: &Db, group: &UpdateGroup) -> Result<Option<UpdateGroup>> {
-    let g = sqlx::query_as::<_, UpdateGroup>(
-        "SELECT * FROM update_groups
-         WHERE branch_id = ?1 AND runtime_version = ?2
-           AND (created_at < ?3 OR (created_at = ?3 AND id < ?4))
-         ORDER BY created_at DESC, id DESC LIMIT 1",
-    )
-    .bind(&group.branch_id)
-    .bind(&group.runtime_version)
-    .bind(&group.created_at)
-    .bind(&group.id)
-    .fetch_optional(db)
-    .await?;
-    Ok(g)
-}
-
 /// Look up an update by id, confined to one app.
 pub async fn find_update_in_app(db: &Db, app_id: &str, update_id: &str) -> Result<Option<Update>> {
     let u = sqlx::query_as::<_, Update>(
@@ -526,13 +508,27 @@ pub async fn asset_in_app(db: &Db, app_id: &str, sha256: &str) -> Result<bool> {
 
 // ───────────────────────── channel releases ─────────────────────────
 
-/// Point a channel's release pointer for one runtime version at a group.
+/// Point a channel's release pointer for one runtime version at a group, and
+/// append it to the channel's release history.
 pub async fn set_channel_release(
     db: &Db,
     channel_id: &str,
     runtime_version: &str,
     group_id: &str,
 ) -> Result<()> {
+    let mut tx = db.begin().await?;
+    set_channel_release_tx(&mut tx, channel_id, runtime_version, group_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn set_channel_release_tx(
+    tx: &mut sqlx::SqliteConnection,
+    channel_id: &str,
+    runtime_version: &str,
+    group_id: &str,
+) -> Result<()> {
+    let now = now_rfc3339();
     sqlx::query(
         "INSERT INTO channel_releases (channel_id, runtime_version, group_id, released_at)
          VALUES (?, ?, ?, ?)
@@ -542,9 +538,166 @@ pub async fn set_channel_release(
     .bind(channel_id)
     .bind(runtime_version)
     .bind(group_id)
-    .bind(now_rfc3339())
-    .execute(db)
+    .bind(&now)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        "INSERT INTO channel_release_history (channel_id, runtime_version, group_id, released_at)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(channel_id)
+    .bind(runtime_version)
+    .bind(group_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Copy a group (its per-platform updates and asset links) into a brand-new
+/// group with fresh ids and a fresh `created_at`.
+///
+/// expo-updates only loads an update whose commit time is NEWER than the one
+/// it is running, so re-serving an older group (rollback, promoting an old
+/// group, repointing to a branch with an older head) needs a new identity, or
+/// devices that already moved past it ignore it.
+pub async fn republish_group(db: &Db, group: &UpdateGroup) -> Result<UpdateGroup> {
+    let mut tx = db.begin().await?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = now_rfc3339();
+    let message = Some(match &group.message {
+        Some(m) => format!("{m} (republish of {})", group.id),
+        None => format!("republish of {}", group.id),
+    });
+    sqlx::query(
+        "INSERT INTO update_groups
+            (id, branch_id, runtime_version, message, git_branch, git_commit,
+             group_type, expo_config_json, content_hash, created_at)
+         SELECT ?, branch_id, runtime_version, ?, git_branch, git_commit,
+                group_type, expo_config_json, content_hash, ?
+         FROM update_groups WHERE id = ?",
+    )
+    .bind(&id)
+    .bind(&message)
+    .bind(&now)
+    .bind(&group.id)
+    .execute(&mut *tx)
+    .await?;
+
+    let updates: Vec<(String,)> = sqlx::query_as("SELECT id FROM updates WHERE group_id = ?")
+        .bind(&group.id)
+        .fetch_all(&mut *tx)
+        .await?;
+    for (old_update_id,) in updates {
+        let new_update_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO updates (id, group_id, platform, launch_asset_id, metadata_json, created_at)
+             SELECT ?, ?, platform, launch_asset_id, metadata_json, ?
+             FROM updates WHERE id = ?",
+        )
+        .bind(&new_update_id)
+        .bind(&id)
+        .bind(&now)
+        .bind(&old_update_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO update_assets (update_id, asset_id, key, file_extension, content_type)
+             SELECT ?, asset_id, key, file_extension, content_type
+             FROM update_assets WHERE update_id = ?",
+        )
+        .bind(&new_update_id)
+        .bind(&old_update_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(UpdateGroup {
+        id,
+        message,
+        created_at: now,
+        ..group.clone()
+    })
+}
+
+/// `group` if it is newer than what the channel currently serves for its
+/// runtime version, otherwise a fresh republish of it (see `republish_group`).
+pub async fn fresh_for_channel(
+    db: &Db,
+    channel_id: &str,
+    group: &UpdateGroup,
+) -> Result<UpdateGroup> {
+    match channel_release(db, channel_id, &group.runtime_version).await? {
+        Some(current)
+            if crate::util::normalize_rfc3339(&group.created_at)
+                <= crate::util::normalize_rfc3339(&current.created_at) =>
+        {
+            republish_group(db, group).await
+        }
+        _ => Ok(group.clone()),
+    }
+}
+
+/// The channel's previous (not rolled back) release for a runtime version:
+/// returns `(history_id_of_current, history_id_of_target, target_group)`.
+pub async fn previous_release(
+    db: &Db,
+    channel_id: &str,
+    runtime_version: &str,
+) -> Result<Option<(i64, i64, UpdateGroup)>> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, group_id FROM channel_release_history
+         WHERE channel_id = ? AND runtime_version = ? AND rolled_back = 0
+         ORDER BY id DESC LIMIT 2",
+    )
+    .bind(channel_id)
+    .bind(runtime_version)
+    .fetch_all(db)
+    .await?;
+    let [(current_id, _), (target_id, target_group)] = rows.as_slice() else {
+        return Ok(None);
+    };
+    Ok(find_group(db, target_group)
+        .await?
+        .map(|g| (*current_id, *target_id, g)))
+}
+
+/// Roll the channel back: flag the current history entry as rolled back,
+/// re-materialize the target history entry as `fresh` (a republished group),
+/// and point the channel at it.
+pub async fn apply_rollback(
+    db: &Db,
+    channel_id: &str,
+    runtime_version: &str,
+    current_history_id: i64,
+    target_history_id: i64,
+    fresh: &UpdateGroup,
+) -> Result<()> {
+    let mut tx = db.begin().await?;
+    sqlx::query("UPDATE channel_release_history SET rolled_back = 1 WHERE id = ?")
+        .bind(current_history_id)
+        .execute(&mut *tx)
+        .await?;
+    let now = now_rfc3339();
+    sqlx::query("UPDATE channel_release_history SET group_id = ?, released_at = ? WHERE id = ?")
+        .bind(&fresh.id)
+        .bind(&now)
+        .bind(target_history_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO channel_releases (channel_id, runtime_version, group_id, released_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(channel_id, runtime_version) DO UPDATE
+           SET group_id = excluded.group_id, released_at = excluded.released_at",
+    )
+    .bind(channel_id)
+    .bind(runtime_version)
+    .bind(&fresh.id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 

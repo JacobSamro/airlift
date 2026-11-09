@@ -446,6 +446,9 @@ pub async fn promote(
     if !branches.iter().any(|b| b.id == group.branch_id) {
         return Err(Error::bad_request("update group belongs to another app"));
     }
+    // Re-releasing a group older than what the channel serves needs a fresh
+    // identity, or devices that already have the newer one ignore it.
+    let group = db::updates::fresh_for_channel(state.db(), &ch.id, &group).await?;
     db::updates::set_channel_release(state.db(), &ch.id, &group.runtime_version, &group.id).await?;
     db::audit::record(
         state.db(),
@@ -458,7 +461,7 @@ pub async fn promote(
     .await
     .ok();
     Ok(json_ok(
-        json!({ "ok": true, "runtime_version": group.runtime_version }),
+        json!({ "ok": true, "runtime_version": group.runtime_version, "group_id": group.id }),
     ))
 }
 
@@ -479,14 +482,26 @@ pub async fn rollback(
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
-    let current = db::updates::channel_release(state.db(), &ch.id, &req.runtime_version)
+    db::updates::channel_release(state.db(), &ch.id, &req.runtime_version)
         .await?
         .ok_or_else(|| Error::bad_request("channel has no release for this runtime version"))?;
-    let previous = db::updates::previous_group(state.db(), &current)
-        .await?
-        .ok_or_else(|| Error::bad_request("no earlier update to roll back to"))?;
-    db::updates::set_channel_release(state.db(), &ch.id, &req.runtime_version, &previous.id)
-        .await?;
+    // Step back through what THIS channel shipped (not the branch's publish
+    // order), and serve it under a fresh identity so devices already running
+    // the newer update actually switch back.
+    let (current_hist, target_hist, target) =
+        db::updates::previous_release(state.db(), &ch.id, &req.runtime_version)
+            .await?
+            .ok_or_else(|| Error::bad_request("no earlier release to roll back to"))?;
+    let previous = db::updates::republish_group(state.db(), &target).await?;
+    db::updates::apply_rollback(
+        state.db(),
+        &ch.id,
+        &req.runtime_version,
+        current_hist,
+        target_hist,
+        &previous,
+    )
+    .await?;
     db::audit::record(
         state.db(),
         Some(&caller.user.id),

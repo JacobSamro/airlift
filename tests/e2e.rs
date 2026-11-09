@@ -294,7 +294,30 @@ async fn publish_and_serve_lifecycle() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
     let manifest3 = verified_part(&ctx, resp, "manifest").await;
-    assert_eq!(manifest3["id"].as_str().unwrap(), update_id);
+    // Same content as v1, but a fresh identity and a NEWER createdAt than v2:
+    // devices only load updates newer than the one they run.
+    assert_eq!(
+        manifest3["launchAsset"]["hash"],
+        manifest["launchAsset"]["hash"]
+    );
+    assert_ne!(manifest3["id"].as_str().unwrap(), update_id);
+    assert!(
+        manifest3["createdAt"].as_str().unwrap() > manifest2["createdAt"].as_str().unwrap(),
+        "rollback must be newer than what devices run"
+    );
+
+    // ── a second rollback has nothing left: v2 was rolled back, v1 is first ──
+    let resp = ctx
+        .http
+        .post(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/channels/production/rollback",
+            ctx.base
+        ))
+        .json(&json!({ "runtime_version": "1.0.0" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
 
     // ── promote back to v2 explicitly ──
     let resp = ctx
@@ -308,6 +331,13 @@ async fn publish_and_serve_lifecycle() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
+    let manifest4 = verified_part(&ctx, resp, "manifest").await;
+    assert_eq!(
+        manifest4["launchAsset"]["hash"],
+        manifest2["launchAsset"]["hash"]
+    );
+    assert!(manifest4["createdAt"].as_str().unwrap() > manifest3["createdAt"].as_str().unwrap());
     let _ = group1;
 
     // ── rollback-to-embedded emits the protocol-1 directive ──
