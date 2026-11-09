@@ -8,6 +8,9 @@ const base = computed(() => `/orgs/${props.slug}/apps/${props.app}`);
 const tabs = computed(() => [
   { to: base.value, label: "Overview", icon: "rocket" },
   { to: `${base.value}/devices`, label: "Devices", icon: "globe" },
+  { to: `${base.value}/errors`, label: "Errors", icon: "alert" },
+  { to: `${base.value}/logs`, label: "Logs", icon: "terminal" },
+  { to: `${base.value}/metrics`, label: "Metrics", icon: "grid" },
 ]);
 </script>
 

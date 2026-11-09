@@ -258,7 +258,8 @@ pub struct LogRow {
     pub trace_id: Option<String>,
 }
 
-/// Log search: newest first; `before_id` pages backwards.
+/// Log search: newest first by timestamp; `before_id` (the last row of the
+/// previous page) pages backwards on (ts, id).
 pub struct LogQuery<'a> {
     pub since: &'a str,
     pub min_severity: i64,
@@ -286,8 +287,8 @@ pub async fn query_logs(db: &Db, app_id: &str, q: &LogQuery<'_>) -> Result<Vec<L
            AND (?4 IS NULL OR body LIKE ?4 ESCAPE '\\' OR attributes LIKE ?4 ESCAPE '\\')
            AND (?5 IS NULL OR update_id = ?5)
            AND (?6 IS NULL OR client_id = ?6)
-           AND (?7 IS NULL OR id < ?7)
-         ORDER BY id DESC LIMIT ?8",
+           AND (?7 IS NULL OR (ts, id) < ((SELECT ts FROM log_records WHERE id = ?7), ?7))
+         ORDER BY ts DESC, id DESC LIMIT ?8",
     )
     .bind(app_id)
     .bind(q.since)

@@ -144,7 +144,7 @@ const shortId = (id: string | null) => (id ? id.slice(0, 8) : "embedded");
           </thead>
           <tbody>
             <tr v-for="c in clients.slice(0, 100)" :key="c.client_id" class="border-b border-border last:border-0">
-              <td class="px-2 py-2 font-mono text-xs">{{ c.client_id.slice(0, 12) }}</td>
+              <td class="px-2 py-2 font-mono text-xs">{{ c.client_id.length > 20 ? `${c.client_id.slice(0, 20)}…` : c.client_id }}</td>
               <td class="px-2 py-2">{{ c.platform }}</td>
               <td class="px-2 py-2">{{ c.channel }}</td>
               <td class="px-2 py-2 font-mono text-xs">{{ shortId(c.current_update_id) }}</td>
