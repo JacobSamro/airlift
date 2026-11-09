@@ -178,7 +178,14 @@ pub async fn publish(
 
     // ── create the group (refusing a byte-identical republish of the head) ──
     let branch = db::updates::ensure_branch(state.db(), &app.id, &branch_name).await?;
-    if let Some(head) = db::updates::head_group(state.db(), &branch.id, &runtime_version).await? {
+
+    // Everything from the duplicate check to the channel advance is one
+    // IMMEDIATE transaction: a failure can't leave a half-built group at the
+    // branch head (which would 409 every retry), and concurrent publishes /
+    // channel edits serialize instead of overwriting each other with a stale
+    // view of the channels.
+    let mut tx = state.db().begin_with("BEGIN IMMEDIATE").await?;
+    if let Some(head) = db::updates::head_group(&mut *tx, &branch.id, &runtime_version).await? {
         if head.content_hash == content_hash {
             return Err(Error::conflict(
                 "this exact update is already the head of the branch",
@@ -187,7 +194,7 @@ pub async fn publish(
     }
 
     let group = db::updates::create_group(
-        state.db(),
+        &mut *tx,
         &branch.id,
         &runtime_version,
         message.as_deref(),
@@ -202,7 +209,7 @@ pub async fn publish(
     let mut platforms = Vec::new();
     for (platform, s) in &staged {
         let update = db::updates::create_update(
-            state.db(),
+            &mut *tx,
             &group.id,
             platform,
             &s.launch.id,
@@ -211,7 +218,7 @@ pub async fn publish(
         .await?;
         for (asset, key, ext, content_type) in &s.assets {
             db::updates::add_update_asset(
-                state.db(),
+                &mut *tx,
                 &update.id,
                 &asset.id,
                 key,
@@ -223,7 +230,8 @@ pub async fn publish(
         platforms.push(platform.clone());
     }
 
-    let released = advance_channels(&state, &app, &branch, &group).await?;
+    let released = advance_channels(&mut tx, &app, &branch, &group).await?;
+    tx.commit().await?;
 
     metrics::counter!("airlift_publish_total", "app" => app.slug.clone()).increment(1);
     db::audit::record(
@@ -256,19 +264,19 @@ pub async fn publish(
 /// so a fresh `publish --branch production` is immediately servable on the
 /// `production` channel).
 pub(crate) async fn advance_channels(
-    state: &AppState,
+    tx: &mut sqlx::SqliteConnection,
     app: &db::apps::App,
     branch: &db::updates::Branch,
     group: &db::updates::UpdateGroup,
 ) -> Result<Vec<serde_json::Value>> {
-    let mut channels = db::updates::channels_for_branch(state.db(), &branch.id).await?;
+    let mut channels = db::updates::channels_for_branch(&mut *tx, &branch.id).await?;
     if channels.is_empty()
-        && db::updates::find_channel(state.db(), &app.id, &branch.name)
+        && db::updates::find_channel(&mut *tx, &app.id, &branch.name)
             .await?
             .is_none()
     {
         let ch =
-            db::updates::create_channel(state.db(), &app.id, &branch.name, Some(&branch.id), true)
+            db::updates::create_channel(&mut *tx, &app.id, &branch.name, Some(&branch.id), true)
                 .await?;
         channels.push(ch);
     }
@@ -276,7 +284,7 @@ pub(crate) async fn advance_channels(
     let mut released = Vec::new();
     for ch in channels {
         if ch.auto_release {
-            db::updates::set_channel_release(state.db(), &ch.id, &group.runtime_version, &group.id)
+            db::updates::set_channel_release_tx(tx, &ch.id, &group.runtime_version, &group.id)
                 .await?;
             released.push(json!({ "channel": ch.name, "status": "released" }));
         } else {

@@ -116,7 +116,11 @@ pub async fn list_branches(db: &Db, app_id: &str) -> Result<Vec<Branch>> {
 
 // ───────────────────────── channels ─────────────────────────
 
-pub async fn find_channel(db: &Db, app_id: &str, name: &str) -> Result<Option<Channel>> {
+pub async fn find_channel<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
+    app_id: &str,
+    name: &str,
+) -> Result<Option<Channel>> {
     let c = sqlx::query_as::<_, Channel>(
         "SELECT * FROM channels WHERE app_id = ? AND lower(name) = lower(?)",
     )
@@ -135,8 +139,8 @@ pub async fn list_channels(db: &Db, app_id: &str) -> Result<Vec<Channel>> {
     Ok(c)
 }
 
-pub async fn create_channel(
-    db: &Db,
+pub async fn create_channel<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
     app_id: &str,
     name: &str,
     branch_id: Option<&str>,
@@ -200,7 +204,10 @@ pub async fn delete_channel(db: &Db, app_id: &str, channel_id: &str) -> Result<(
 }
 
 /// Channels currently pointing at a branch.
-pub async fn channels_for_branch(db: &Db, branch_id: &str) -> Result<Vec<Channel>> {
+pub async fn channels_for_branch<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
+    branch_id: &str,
+) -> Result<Vec<Channel>> {
     let c = sqlx::query_as::<_, Channel>("SELECT * FROM channels WHERE branch_id = ?")
         .bind(branch_id)
         .fetch_all(db)
@@ -272,8 +279,8 @@ pub async fn delete_asset(db: &Db, asset_id: &str) -> Result<()> {
 // ───────────────────────── update groups / updates ─────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub async fn create_group(
-    db: &Db,
+pub async fn create_group<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
     branch_id: &str,
     runtime_version: &str,
     message: Option<&str>,
@@ -317,8 +324,8 @@ pub async fn create_group(
     })
 }
 
-pub async fn create_update(
-    db: &Db,
+pub async fn create_update<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
     group_id: &str,
     platform: &str,
     launch_asset_id: &str,
@@ -348,8 +355,8 @@ pub async fn create_update(
     })
 }
 
-pub async fn add_update_asset(
-    db: &Db,
+pub async fn add_update_asset<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
     update_id: &str,
     asset_id: &str,
     key: &str,
@@ -372,8 +379,8 @@ pub async fn add_update_asset(
 }
 
 /// The newest group on a branch for a runtime version (the "head").
-pub async fn head_group(
-    db: &Db,
+pub async fn head_group<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
     branch_id: &str,
     runtime_version: &str,
 ) -> Result<Option<UpdateGroup>> {

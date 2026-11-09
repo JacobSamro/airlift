@@ -552,8 +552,9 @@ pub async fn rollback_to_embedded(
     let branch = db::updates::find_branch(state.db(), &app.id, &branch)
         .await?
         .ok_or(Error::NotFound)?;
+    let mut tx = state.db().begin_with("BEGIN IMMEDIATE").await?;
     let group = db::updates::create_group(
-        state.db(),
+        &mut *tx,
         &branch.id,
         &req.runtime_version,
         Some("rollback to embedded"),
@@ -564,7 +565,8 @@ pub async fn rollback_to_embedded(
         "",
     )
     .await?;
-    let released = super::publish::advance_channels(&state, &app, &branch, &group).await?;
+    let released = super::publish::advance_channels(&mut tx, &app, &branch, &group).await?;
+    tx.commit().await?;
     db::audit::record(
         state.db(),
         Some(&caller.user.id),
