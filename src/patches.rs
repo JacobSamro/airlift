@@ -134,6 +134,11 @@ async fn update_with_launch(
 /// above any real bsdiff run on a JS bundle.
 const STALE_LEASE_SECS: i64 = 30 * 60;
 
+/// Generation attempts before a pair is marked `failed` for good.
+const MAX_ATTEMPTS: i64 = 3;
+/// First retry delay; doubles per attempt (60s, 120s).
+const RETRY_BASE_SECS: i64 = 60;
+
 /// Poll for queued patch jobs and generate them, one at a time (bsdiff is
 /// CPU- and memory-hungry; concurrency 1 keeps a small box healthy).
 pub async fn worker_loop(state: AppState) {
@@ -174,8 +179,17 @@ async fn generate_next(state: &AppState) -> Result<bool> {
     };
     match generate_one(state, &job).await {
         Ok(()) => {}
+        // Failures are often transient (storage timeouts, a busy DB): retry
+        // with exponential backoff, and only give up after MAX_ATTEMPTS.
+        Err(e) if job.attempts + 1 < MAX_ATTEMPTS => {
+            let backoff = RETRY_BASE_SECS << job.attempts;
+            tracing::warn!(error = %e, patch = %job.id, attempt = job.attempts + 1,
+                backoff, "patch generation failed; will retry");
+            let not_before = crate::util::rfc3339_in(backoff);
+            db::patches::retry_later(state.db(), &job, &e.to_string(), &not_before).await?;
+        }
         Err(e) => {
-            tracing::warn!(error = %e, patch = %job.id, "patch generation failed");
+            tracing::warn!(error = %e, patch = %job.id, "patch generation failed; giving up");
             db::patches::mark_failed(state.db(), &job, &e.to_string()).await?;
         }
     }

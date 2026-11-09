@@ -1,7 +1,8 @@
 //! Queries for the bsdiff patch queue.
 //!
 //! Status flow: `queued` → `generating` → `ready` | `failed` |
-//! `not_beneficial`. Failed jobs stay failed (a later request for the same
+//! `not_beneficial`. A failed attempt is retried with backoff (`attempts`,
+//! `not_before`); after the cap the job stays failed (a later request for the same
 //! pair won't re-enqueue while the row exists); `generating` rows whose
 //! lease (`claimed_at`) went stale are requeued by the worker.
 
@@ -24,6 +25,10 @@ pub struct PatchRow {
     pub created_at: String,
     /// Lease timestamp of the worker currently generating this job.
     pub claimed_at: Option<String>,
+    /// Failed generation attempts so far.
+    pub attempts: i64,
+    /// A retried job isn't claimable before this time (backoff).
+    pub not_before: Option<String>,
 }
 
 pub async fn find(db: &Db, from_update_id: &str, to_update_id: &str) -> Result<Option<PatchRow>> {
@@ -58,17 +63,38 @@ pub async fn enqueue(db: &Db, from_update_id: &str, to_update_id: &str) -> Resul
 pub async fn claim_next(db: &Db) -> Result<Option<PatchRow>> {
     // The lease value doubles as the claim token: a random suffix keeps two
     // claims in the same millisecond distinct.
-    let lease = format!("{}#{}", now_rfc3339(), uuid::Uuid::new_v4());
+    let now = now_rfc3339();
+    let lease = format!("{now}#{}", uuid::Uuid::new_v4());
     let p = sqlx::query_as::<_, PatchRow>(
-        "UPDATE patches SET status = 'generating', claimed_at = ?
-         WHERE id = (SELECT id FROM patches WHERE status = 'queued'
+        "UPDATE patches SET status = 'generating', claimed_at = ?1
+         WHERE id = (SELECT id FROM patches
+                     WHERE status = 'queued' AND (not_before IS NULL OR not_before <= ?2)
                      ORDER BY created_at LIMIT 1)
          RETURNING *",
     )
     .bind(lease)
+    .bind(now)
     .fetch_optional(db)
     .await?;
     Ok(p)
+}
+
+/// A failed attempt that still has retries left: back to the queue, not
+/// claimable before `not_before`. Same lease guard as the terminal writes.
+pub async fn retry_later(db: &Db, job: &PatchRow, detail: &str, not_before: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE patches
+         SET status = 'queued', attempts = attempts + 1, detail = ?, not_before = ?,
+             claimed_at = NULL
+         WHERE id = ? AND status = 'generating' AND claimed_at IS ?",
+    )
+    .bind(detail)
+    .bind(not_before)
+    .bind(&job.id)
+    .bind(&job.claimed_at)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Terminal status write, applied only while `job` still holds its lease (a
