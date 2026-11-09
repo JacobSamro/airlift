@@ -73,6 +73,7 @@ impl FromRequestParts<AppState> for SessionUser {
 /// the token's resource scope and permission cap; a session user is unscoped.
 /// (Used by the publish API in a later phase.)
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct ApiUser {
     pub user: User,
     pub scope: TokenScope,

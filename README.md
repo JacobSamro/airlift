@@ -33,11 +33,31 @@ account, no EAS subscription, no external database.
   get a binary patch between their current launch bundle and the new one
   (often 5–20× smaller), generated lazily in the background and served as
   `226 IM Used`; anything else falls back to the full bundle automatically.
+- **Progressive rollouts & A/B splits** — release to N% of a channel's
+  devices (stable `sha256(EAS-Client-ID:salt)` bucketing, no per-device
+  state; devices in at N% stay in as it grows), or serve a second branch to a
+  share of a channel. The asset endpoint enforces the same check.
+- **Crash protection & per-update health** — updates a device reports in
+  `Expo-Recent-Failed-Update-IDs` are never served to it again (remembered via
+  `expo-server-defined-headers`); each update/rollout shows a crash-rate badge.
+- **Fast manifests** — an in-process cache (auto-invalidated by SQLite hooks)
+  answers check-ins with no SQL and no RSA work: ~78k req/s, p95 0.6 ms on a
+  laptop.
+- **Device observability (SQLite only)** — device geo map (GeoLite2 or CDN
+  headers), JS error groups symbolicated with each update's sourcemap
+  (`airlift-reporter` or OTLP), OTLP log and metric viewers.
 - **Client monitoring** — device check-ins, per-update adoption, daily
   activity series; Prometheus metrics at `/metrics`.
-- **Multi-tenant** — orgs, members, teams with per-app permissions
-  (read/publish/admin), personal access tokens with scopes and caps,
-  optional Google sign-in.
+- **Multi-tenant & governance** — orgs, members, teams; custom roles over
+  fine-grained capabilities; branch protection; personal access tokens with
+  scopes, caps and IP allowlists; audit log with CSV/JSONL export; Google,
+  OIDC and SAML 2.0 single sign-on.
+- **MCP server for agents** — `/mcp` (Streamable HTTP) with airlift as its own
+  OAuth 2.1 authorization server (discovery, dynamic registration, PKCE):
+  agents list, publish, roll out and roll back with the signed-in user's
+  permissions.
+- **Key rotation** — multiple code-signing keys per app; builds pick theirs
+  by `keyid`, so rotating never breaks binaries in the field.
 - **Single self-contained binary** — embedded SQLite (WAL), embedded Nuxt
   dashboard, automatic Let's Encrypt TLS. Runs on a minimal VPS.
 
@@ -117,6 +137,23 @@ npx airlift-cli rollback --channel production --runtime-version 1.0.0
   instance-admin session).
 - `GET /healthz` — liveness.
 - `/api/v1/…` — dashboard/CLI REST API (session cookie or `Bearer alt_…` PAT).
+- `POST /u/{app-id}/errors`, `/u/{app-id}/otlp/v1/{logs,metrics}` — device
+  telemetry (airlift-reporter / OTLP HTTP JSON).
+- `POST /mcp` — MCP server for agents (OAuth: `/.well-known/oauth-protected-resource`,
+  `/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`,
+  `/oauth/token`).
+
+## Agents (MCP)
+
+Add `https://updates.example.com/mcp` as a remote MCP server in your agent
+(Claude Code: `claude mcp add --transport http airlift https://updates.example.com/mcp`).
+The client discovers airlift's OAuth server, registers itself, and opens a
+consent page where you choose what it may do (read / publish / admin, all orgs
+or one). It then acts with exactly your permissions (plus that cap); the grant
+shows up under **Access Tokens** as `MCP: <client>` and can be revoked there.
+Tools: `list_apps`, `get_app`, `list_updates`, `publish` (base64 export zip),
+`promote`, `start_rollout`, `set_rollout`, `rollback`, `republish`,
+`list_errors`, `app_stats`.
 
 ## Configuration
 

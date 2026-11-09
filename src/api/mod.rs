@@ -2,7 +2,8 @@
 //! PAT for the automation-facing endpoints).
 
 pub mod apps;
-mod observability;
+pub mod oauth_server;
+pub(crate) mod observability;
 pub mod publish;
 mod sso;
 
@@ -34,6 +35,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/auth/providers", get(providers))
         .route("/api/v1/auth/google/login", get(google_login))
         .route("/api/v1/auth/google/callback", get(google_callback))
+        .route("/api/v1/oauth/client", get(oauth_server::client_info))
+        .route("/api/v1/oauth/consent", post(oauth_server::consent))
         .route("/api/v1/auth/sso/discover", get(sso::discover))
         .route("/api/v1/auth/sso/{id}/login", get(sso::login))
         .route("/api/v1/auth/sso/{id}/callback", get(sso::oidc_callback))

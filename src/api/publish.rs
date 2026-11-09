@@ -58,11 +58,6 @@ pub async fn publish(
     Path(app_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<Response> {
-    let app = db::apps::find_by_id(state.db(), &app_id)
-        .await?
-        .ok_or(Error::NotFound)?;
-    let caps = rbac::require(state.db(), &caller, &app, Capability::Publish).await?;
-
     // ── collect form fields ──
     let mut branch_name = None;
     let mut runtime_version = None;
@@ -100,6 +95,59 @@ pub async fn publish(
         }
     }
 
+    let body = publish_archive(
+        &state,
+        &caller,
+        &app_id,
+        PublishInput {
+            branch: branch_name,
+            runtime_version,
+            message,
+            git_branch,
+            git_commit,
+            expo_config,
+            rollout_percent,
+            archive,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(body)).into_response())
+}
+
+/// A publish request, however it arrived (multipart form or the MCP tool).
+pub struct PublishInput {
+    pub branch: Option<String>,
+    pub runtime_version: Option<String>,
+    pub message: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_commit: Option<String>,
+    pub expo_config: Option<String>,
+    pub rollout_percent: Option<String>,
+    pub archive: Option<Vec<u8>>,
+}
+
+/// Validate, store and release an `expo export` archive for an app
+/// (requires `publish`; protected branches also need `protected`).
+pub async fn publish_archive(
+    state: &AppState,
+    caller: &ApiUser,
+    app_id: &str,
+    input: PublishInput,
+) -> Result<serde_json::Value> {
+    let app = db::apps::find_by_id(state.db(), app_id)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let caps = rbac::require(state.db(), caller, &app, Capability::Publish).await?;
+    let PublishInput {
+        branch: branch_name,
+        runtime_version,
+        message,
+        git_branch,
+        git_commit,
+        expo_config,
+        rollout_percent,
+        archive,
+    } = input;
     let branch_name = required(branch_name, "branch")?;
     let runtime_version = required(runtime_version, "runtime_version")?;
     let archive = archive.ok_or_else(|| Error::bad_request("missing archive file field"))?;
@@ -164,7 +212,7 @@ pub async fn publish(
     for (platform, pm) in &metadata.file_metadata {
         let bundle_bytes = read_zip_file(&mut zip, &pm.bundle, &mut budget)?;
         let launch =
-            store_asset(&state, &app.org_id, bundle_bytes, "application/javascript").await?;
+            store_asset(state, &app.org_id, bundle_bytes, "application/javascript").await?;
         content_hasher.update(platform.as_bytes());
         content_hasher.update(launch.sha256.as_bytes());
 
@@ -191,7 +239,7 @@ pub async fn publish(
             let content_type = mime_guess::from_ext(&entry.ext)
                 .first_or_octet_stream()
                 .to_string();
-            let asset = store_asset(&state, &app.org_id, bytes, &content_type).await?;
+            let asset = store_asset(state, &app.org_id, bytes, &content_type).await?;
             content_hasher.update(asset.sha256.as_bytes());
             // The manifest asset key is the export filename (an md5 hash).
             let key = entry
@@ -314,18 +362,14 @@ pub async fn publish(
     .await
     .ok();
 
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "group_id": group.id,
-            "branch": branch.name,
-            "runtime_version": runtime_version,
-            "platforms": platforms,
-            "carried_platforms": carried,
-            "channels": released,
-        })),
-    )
-        .into_response())
+    Ok(json!({
+        "group_id": group.id,
+        "branch": branch.name,
+        "runtime_version": runtime_version,
+        "platforms": platforms,
+        "carried_platforms": carried,
+        "channels": released,
+    }))
 }
 
 /// Advance the release pointer of every auto-release channel pointing at

@@ -10,6 +10,7 @@ mod gc;
 mod geo;
 mod keys;
 mod manifest_cache;
+mod mcp;
 mod models;
 mod observability;
 mod patches;

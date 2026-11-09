@@ -2345,3 +2345,380 @@ async fn oidc_sso_login_and_account_rules() {
         .unwrap()
         .starts_with("https://idp.saml.test/sso?SAMLRequest="));
 }
+
+/// Walk an MCP client through discovery → registration → consent → token;
+/// returns (access, refresh, client_id).
+async fn mcp_grant(ctx: &Ctx, permission: &str) -> (String, String, String) {
+    let anon = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    // 401 tells the client where the resource metadata is.
+    let resp = anon
+        .post(format!("{}/mcp", ctx.base))
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let www = resp.headers()["www-authenticate"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let md_url = www
+        .split("resource_metadata=\"")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches('"')
+        .to_string();
+    let md: Value = anon
+        .get(&md_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let as_url = md["authorization_servers"][0].as_str().unwrap().to_string();
+    let asm: Value = anon
+        .get(format!("{as_url}/.well-known/oauth-authorization-server"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(asm["code_challenge_methods_supported"], json!(["S256"]));
+
+    let redirect = "http://127.0.0.1:33418/callback";
+    let reg: Value = anon
+        .post(asm["registration_endpoint"].as_str().unwrap())
+        .json(&json!({ "client_name": "Test Agent", "redirect_uris": [redirect] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let client_id = reg["client_id"].as_str().unwrap().to_string();
+
+    let verifier = "v".repeat(50);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(<sha2::Sha256 as sha2::Digest>::digest(verifier.as_bytes()));
+    let resp = anon
+        .get(asm["authorization_endpoint"].as_str().unwrap())
+        .query(&[
+            ("response_type", "code"),
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", redirect),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("state", "xyz"),
+            ("resource", &format!("{}/mcp", ctx.base)),
+        ])
+        .send()
+        .await
+        .unwrap();
+    let consent = resp.headers()["location"].to_str().unwrap().to_string();
+    assert!(consent.starts_with("/oauth/consent?"), "{consent}");
+
+    // The signed-in user approves on the consent page.
+    let info: Value = ctx
+        .http
+        .get(format!("{}/api/v1/oauth/client", ctx.base))
+        .query(&[
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", redirect),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["name"], "Test Agent");
+    let approved: Value = ctx
+        .http
+        .post(format!("{}/api/v1/oauth/consent", ctx.base))
+        .json(
+            &json!({ "client_id": client_id, "redirect_uri": redirect, "code_challenge": challenge,
+            "state": "xyz", "approve": true, "permission": permission, "org": "acme" }),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let back = reqwest::Url::parse(approved["redirect"].as_str().unwrap()).unwrap();
+    let q: std::collections::HashMap<_, _> = back.query_pairs().into_owned().collect();
+    assert_eq!(q["state"], "xyz");
+
+    let token = |verifier: String| {
+        let anon = anon.clone();
+        let url = asm["token_endpoint"].as_str().unwrap().to_string();
+        let form = vec![
+            ("grant_type".to_string(), "authorization_code".to_string()),
+            ("code".to_string(), q["code"].clone()),
+            ("redirect_uri".to_string(), redirect.to_string()),
+            ("client_id".to_string(), client_id.clone()),
+            ("code_verifier".to_string(), verifier),
+        ];
+        async move { anon.post(url).form(&form).send().await.unwrap() }
+    };
+    // Wrong verifier fails (and burns the code).
+    let bad = token("w".repeat(50)).await;
+    assert_eq!(bad.status(), 400);
+    // So run the dance again for a fresh code… simpler: re-approve.
+    let approved: Value = ctx
+        .http
+        .post(format!("{}/api/v1/oauth/consent", ctx.base))
+        .json(
+            &json!({ "client_id": client_id, "redirect_uri": redirect, "code_challenge": challenge,
+            "state": "xyz", "approve": true, "permission": permission, "org": "acme" }),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let back = reqwest::Url::parse(approved["redirect"].as_str().unwrap()).unwrap();
+    let code = back
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .unwrap()
+        .1
+        .to_string();
+    let tok: Value = anon
+        .post(asm["token_endpoint"].as_str().unwrap())
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", redirect),
+            ("client_id", client_id.as_str()),
+            ("code_verifier", verifier.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    (
+        tok["access_token"].as_str().unwrap().to_string(),
+        tok["refresh_token"].as_str().unwrap().to_string(),
+        client_id,
+    )
+}
+
+async fn mcp_call(ctx: &Ctx, token: &str, method: &str, params: Value) -> (u16, Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/mcp", ctx.base))
+        .bearer_auth(token)
+        .json(&json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_over_oauth() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    let (access, refresh, client_id) = mcp_grant(&ctx, "publish").await;
+
+    let (status, init) = mcp_call(
+        &ctx,
+        &access,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    let (_, tools) = mcp_call(&ctx, &access, "tools/list", json!({})).await;
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for t in [
+        "list_apps",
+        "publish",
+        "start_rollout",
+        "rollback",
+        "promote",
+    ] {
+        assert!(names.contains(&t), "{names:?}");
+    }
+
+    let call = |name: &'static str, args: Value| {
+        let (ctx_base, access) = (ctx.base.clone(), access.clone());
+        async move {
+            let resp = reqwest::Client::new()
+                .post(format!("{ctx_base}/mcp"))
+                .bearer_auth(access)
+                .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": { "name": name, "arguments": args } }))
+                .send()
+                .await
+                .unwrap();
+            resp.json::<Value>().await.unwrap()["result"].clone()
+        }
+    };
+    let apps = call("list_apps", json!({})).await;
+    assert_eq!(
+        apps["structuredContent"]["orgs"][0]["apps"][0]["slug"], "mobile",
+        "{apps}"
+    );
+
+    // Publish through MCP (base64 export), then roll it out to 25%.
+    let zip = base64::engine::general_purpose::STANDARD.encode(export_zip(&["ios"], "mcp"));
+    let published = call(
+        "publish",
+        json!({ "org": "acme", "app": "mobile", "branch": "production",
+        "runtime_version": "1.0.0", "archive_base64": zip, "message": "from an agent" }),
+    )
+    .await;
+    assert_eq!(published["isError"], false, "{published}");
+    let gid = published["structuredContent"]["group_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second = base64::engine::general_purpose::STANDARD.encode(export_zip(&["ios"], "mcp2"));
+    let p2 = call(
+        "publish",
+        json!({ "org": "acme", "app": "mobile", "branch": "staging",
+        "runtime_version": "1.0.0", "archive_base64": second }),
+    )
+    .await;
+    let gid2 = p2["structuredContent"]["group_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = call(
+        "start_rollout",
+        json!({ "org": "acme", "app": "mobile", "channel": "production",
+        "group_id": gid2, "percent": 25 }),
+    )
+    .await;
+    assert_eq!(r["isError"], false, "{r}");
+    let app = call("get_app", json!({ "org": "acme", "app": "mobile" })).await;
+    let prod = app["structuredContent"]["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "production")
+        .unwrap()
+        .clone();
+    assert_eq!(prod["releases"][0]["rollout_percent"], 25.0);
+    assert_eq!(prod["releases"][0]["previous_group_id"], gid.as_str());
+    // Errors come back as tool errors, not transport errors.
+    let r = call(
+        "promote",
+        json!({ "org": "acme", "app": "nope", "channel": "x", "group_id": "y" }),
+    )
+    .await;
+    assert_eq!(r["isError"], true);
+
+    // A read-capped grant can look but not publish.
+    let (ro, _, _) = mcp_grant(&ctx, "read").await;
+    let (_, r) = mcp_call(&ctx, &ro, "tools/call", json!({ "name": "publish", "arguments": {
+        "org": "acme", "app": "mobile", "branch": "production", "runtime_version": "1.0.0",
+        "archive_base64": base64::engine::general_purpose::STANDARD.encode(export_zip(&["ios"], "ro")) } })).await;
+    assert_eq!(r["result"]["isError"], true, "{r}");
+
+    // Refresh rotates: the old access token stops working.
+    let tok: Value = reqwest::Client::new()
+        .post(format!("{}/oauth/token", ctx.base))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
+            ("client_id", client_id.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let access2 = tok["access_token"].as_str().unwrap().to_string();
+    assert_eq!(mcp_call(&ctx, &access, "ping", json!({})).await.0, 401);
+    assert_eq!(mcp_call(&ctx, &access2, "ping", json!({})).await.0, 200);
+    // Reusing the old refresh token fails.
+    let resp = reqwest::Client::new()
+        .post(format!("{}/oauth/token", ctx.base))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
+            ("client_id", client_id.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // The grant is an Access Token the user can see and revoke.
+    let list: Value = ctx
+        .http
+        .get(format!("{}/api/v1/tokens", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let grant = list["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "MCP: Test Agent" && t["max_perm"] == "publish")
+        .unwrap()
+        .clone();
+    ctx.http
+        .delete(format!(
+            "{}/api/v1/tokens/{}",
+            ctx.base,
+            grant["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mcp_call(&ctx, &access2, "ping", json!({})).await.0, 401);
+    let new_refresh = tok["refresh_token"].as_str().unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{}/oauth/token", ctx.base))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", new_refresh),
+            ("client_id", client_id.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "revoked grant can't refresh");
+
+    // Cookie sessions don't authenticate /mcp, and foreign Origins are refused.
+    let resp = ctx
+        .http
+        .post(format!("{}/mcp", ctx.base))
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let resp = reqwest::Client::new()
+        .post(format!("{}/mcp", ctx.base))
+        .bearer_auth(&ro)
+        .header("origin", "https://evil.example")
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}

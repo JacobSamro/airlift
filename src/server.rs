@@ -61,6 +61,8 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::api::routes())
         .merge(crate::protocol::routes())
         .merge(crate::observability::ingest::routes())
+        .merge(oauth_routes())
+        .route("/mcp", get(crate::mcp::get_mcp).post(crate::mcp::post_mcp))
         .fallback(crate::web::handler)
         // Bounds uploaded `expo export` archives (axum's default is 2 MB).
         .layer(axum::extract::DefaultBodyLimit::max(
@@ -175,4 +177,34 @@ pub async fn shutdown_signal() {
 
     tracing::info!("shutdown signal received");
     let _ = Duration::from_secs(0);
+}
+
+/// OAuth discovery/registration/token endpoints for MCP clients. CORS-open
+/// (no credentials) so browser-based MCP clients can discover and register;
+/// `/mcp` itself enforces its own Origin check.
+fn oauth_routes() -> Router<AppState> {
+    use crate::api::oauth_server as oauth;
+    use axum::routing::post;
+    Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::authorization_server),
+        )
+        .route("/oauth/register", post(oauth::register))
+        .route("/oauth/token", post(oauth::token))
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
+        )
+        .route("/oauth/authorize", get(oauth::authorize))
 }
