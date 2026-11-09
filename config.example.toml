@@ -9,6 +9,8 @@ public_url = "https://updates.example.com"
 max_body_bytes = 268435456           # 256 MiB cap for uploaded export archives
 trust_proxy = false                  # true only behind a trusted proxy that sets
                                      # X-Forwarded-For / X-Real-IP (rate limiting)
+metrics_token = ""                   # Bearer token for Prometheus to scrape
+                                     # /metrics; empty = instance admins only
 
 [database]
 path = "/var/lib/airlift/airlift.db"

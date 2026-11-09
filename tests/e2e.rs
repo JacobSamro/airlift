@@ -753,6 +753,10 @@ async fn client_monitoring_and_metrics() {
         "{metrics}"
     );
     assert!(metrics.contains("airlift_publish_total"));
+
+    // …but it lists every org's app slugs, so it isn't public.
+    let resp = reqwest::get(format!("{}/metrics", ctx.base)).await.unwrap();
+    assert_eq!(resp.status(), 401);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -116,6 +116,10 @@ pub struct ServerConfig {
     /// sets these; otherwise the peer socket address is used.
     #[serde(default)]
     pub trust_proxy: bool,
+    /// Bearer token a Prometheus scraper presents for `GET /metrics`. Empty =
+    /// only signed-in instance admins can read metrics.
+    #[serde(default)]
+    pub metrics_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +185,7 @@ impl Default for ServerConfig {
             // typically a few MB; 256 MiB leaves generous headroom.
             max_body_bytes: 256 * 1024 * 1024,
             trust_proxy: false,
+            metrics_token: String::new(),
         }
     }
 }

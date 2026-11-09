@@ -57,7 +57,7 @@ pub fn router(state: AppState) -> Router {
 
     let mut router = Router::new()
         .route("/healthz", get(healthz))
-        .route("/metrics", get(|| async { prometheus_handle().render() }))
+        .route("/metrics", get(metrics))
         .merge(crate::api::routes())
         .merge(crate::protocol::routes())
         .fallback(crate::web::handler)
@@ -85,6 +85,42 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Liveness/readiness probe. Verifies the database is reachable.
+/// Prometheus exposition. Labels carry every org's app slugs, so it is not
+/// public: scrape with `Authorization: Bearer <server.metrics_token>`, or be
+/// signed in as an instance admin (unscoped, admin-capped).
+async fn metrics(
+    State(state): State<AppState>,
+    mut parts: axum::http::request::Parts,
+) -> axum::response::Response {
+    use axum::extract::FromRequestParts;
+    let token = &state.config().server.metrics_token;
+    let bearer = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
+    if !token.is_empty() && bearer.is_some_and(|b| constant_time_eq(b.as_bytes(), token.as_bytes()))
+    {
+        return prometheus_handle().render().into_response();
+    }
+    match crate::auth::ApiUser::from_request_parts(&mut parts, &state).await {
+        Ok(u)
+            if u.user.is_admin
+                && u.cap == crate::models::Permission::Admin
+                && matches!(u.scope, crate::models::TokenScope::All) =>
+        {
+            prometheus_handle().render().into_response()
+        }
+        Ok(_) => crate::error::Error::Forbidden.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     match sqlx::query("SELECT 1").execute(state.db()).await {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))),

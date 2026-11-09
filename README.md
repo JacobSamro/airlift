@@ -113,7 +113,8 @@ npx airlift-cli rollback --channel production --runtime-version 1.0.0
 - `GET /u/{app-id}/manifest` — the Expo Updates manifest endpoint (this is
   what `updates.url` points at).
 - `GET /u/{app-id}/assets/{sha256}` — 307 redirect to a presigned storage URL.
-- `GET /metrics` — Prometheus exposition.
+- `GET /metrics` — Prometheus exposition (`Bearer <server.metrics_token>`, or an
+  instance-admin session).
 - `GET /healthz` — liveness.
 - `/api/v1/…` — dashboard/CLI REST API (session cookie or `Bearer alt_…` PAT).
 
