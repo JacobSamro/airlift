@@ -50,36 +50,103 @@ fn param(
 
 // ───────────────────────── manifest ─────────────────────────
 
+/// Server-defined header carrying the updates this device must never be
+/// served again. expo-updates stores `expo-server-defined-headers` and sends
+/// them back on every request, so the block outlives the client's own
+/// (short, self-pruning) `Expo-Recent-Failed-Update-IDs` list.
+const BLOCKED_HEADER: &str = "airlift-blocked-updates";
+/// Cap on remembered blocked update ids (newest failures kept).
+const MAX_BLOCKED: usize = 20;
+
+/// Parse a list of update ids from a header value: an SFV list of strings
+/// (`"id1", "id2"`) or a plain comma/space separated list. Anything that isn't
+/// a UUID is dropped; ids are lowercased.
+fn parse_update_ids(value: &str) -> Vec<String> {
+    value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|s| s.trim().trim_matches('"'))
+        .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+        .map(|u| u.hyphenated().to_string())
+        .collect()
+}
+
+/// Updates to refuse for this device: what it just reported as failed
+/// (first, so they survive the cap) plus what we told it to remember.
+fn blocked_updates(
+    headers: &HeaderMap,
+    query: &std::collections::HashMap<String, String>,
+) -> (Vec<String>, Vec<String>) {
+    let failed = param(headers, query, "expo-recent-failed-update-ids")
+        .map(|v| parse_update_ids(&v))
+        .unwrap_or_default();
+    let remembered = param(headers, query, BLOCKED_HEADER)
+        .map(|v| parse_update_ids(&v))
+        .unwrap_or_default();
+    let mut blocked: Vec<String> = Vec::new();
+    for id in failed.iter().chain(remembered.iter()) {
+        if !blocked.contains(id) && blocked.len() < MAX_BLOCKED {
+            blocked.push(id.clone());
+        }
+    }
+    (failed, blocked)
+}
+
 async fn manifest(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
     headers: HeaderMap,
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response> {
-    let app = db::apps::find_by_id(state.db(), &app_id)
+    let (failed, blocked) = blocked_updates(&headers, &query);
+    let mut resp = manifest_inner(&state, &app_id, &headers, &query, &failed, &blocked).await?;
+    // Always (re)state the full blocked set: the client replaces its stored
+    // server-defined headers with whatever the latest response carries.
+    let value = if blocked.is_empty() {
+        String::new()
+    } else {
+        format!("{BLOCKED_HEADER}=\"{}\"", blocked.join(","))
+    };
+    if let Ok(v) = axum::http::HeaderValue::from_str(&value) {
+        resp.headers_mut().insert(
+            header::HeaderName::from_static("expo-server-defined-headers"),
+            v,
+        );
+    }
+    Ok(resp)
+}
+
+async fn manifest_inner(
+    state: &AppState,
+    app_id: &str,
+    headers: &HeaderMap,
+    query: &std::collections::HashMap<String, String>,
+    failed: &[String],
+    blocked: &[String],
+) -> Result<Response> {
+    let app = db::apps::find_by_id(state.db(), app_id)
         .await?
         .ok_or(Error::NotFound)?;
 
-    let platform = param(&headers, &query, "expo-platform")
+    let platform = param(headers, query, "expo-platform")
         .ok_or_else(|| Error::bad_request("missing expo-platform"))?;
     if !matches!(platform.as_str(), "ios" | "android") {
         return Err(Error::bad_request("expo-platform must be ios or android"));
     }
-    let runtime_version = param(&headers, &query, "expo-runtime-version")
+    let runtime_version = param(headers, query, "expo-runtime-version")
         .ok_or_else(|| Error::bad_request("missing expo-runtime-version"))?;
-    let channel_name = param(&headers, &query, "expo-channel-name")
+    let channel_name = param(headers, query, "expo-channel-name")
         .ok_or_else(|| Error::bad_request("missing expo-channel-name"))?;
-    let protocol: u8 = param(&headers, &query, "expo-protocol-version")
+    let protocol: u8 = param(headers, query, "expo-protocol-version")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     if protocol > 1 {
         return Err(Error::bad_request("unsupported expo-protocol-version"));
     }
     let current_update_id =
-        param(&headers, &query, "expo-current-update-id").map(|s| s.to_ascii_lowercase());
-    let expect_signature = param(&headers, &query, "expo-expect-signature").is_some();
-    let client_id = param(&headers, &query, "eas-client-id");
-    let embedded_update_id = param(&headers, &query, "expo-embedded-update-id");
+        param(headers, query, "expo-current-update-id").map(|s| s.to_ascii_lowercase());
+    let expect_signature = param(headers, query, "expo-expect-signature").is_some();
+    let client_id = param(headers, query, "eas-client-id");
+    let embedded_update_id = param(headers, query, "expo-embedded-update-id");
 
     // Off-hot-path accounting: bump the Prometheus counter and record the
     // device check-in (flushed to SQLite by the background loop).
@@ -100,6 +167,7 @@ async fn manifest(
             embedded_update_id.as_deref(),
             current_update_id.as_deref(),
             served_update_id,
+            failed,
         );
     };
 
@@ -113,7 +181,7 @@ async fn manifest(
 
     let Some(group) = group else {
         track("no_update", "");
-        return no_update_response(&state, &app, protocol, expect_signature).await;
+        return no_update_response(state, &app, protocol, expect_signature).await;
     };
 
     // A rollback group emits the protocol-1 directive; protocol-0 clients
@@ -126,7 +194,7 @@ async fn manifest(
                 "parameters": { "commitTime": crate::util::normalize_rfc3339(&group.created_at) },
             });
             return multipart_response(
-                &state,
+                state,
                 &app,
                 protocol,
                 "directive",
@@ -141,19 +209,26 @@ async fn manifest(
     let updates = db::updates::updates_in_group(state.db(), &group.id).await?;
     let Some(update) = updates.into_iter().find(|u| u.platform == platform) else {
         track("no_update", "");
-        return no_update_response(&state, &app, protocol, expect_signature).await;
+        return no_update_response(state, &app, protocol, expect_signature).await;
     };
+
+    // Never re-serve an update this device crashed on (or was told to
+    // remember as crashed): it stays on whatever it runs now.
+    if blocked.contains(&update.id.to_ascii_lowercase()) {
+        track("blocked", "");
+        return no_update_response(state, &app, protocol, expect_signature).await;
+    }
 
     // The client is already running exactly this update. Attribute the
     // check-in to that update so adoption stats count settled devices.
     if current_update_id.as_deref() == Some(&update.id.to_ascii_lowercase()) {
         track("up_to_date", &update.id);
-        return no_update_response(&state, &app, protocol, expect_signature).await;
+        return no_update_response(state, &app, protocol, expect_signature).await;
     }
     track("manifest", &update.id);
 
     // ── build the manifest ──
-    let base = crate::auth::base_url(&state, &headers);
+    let base = crate::auth::base_url(state, headers);
     let launch = db::updates::launch_asset(state.db(), &update.id)
         .await?
         .ok_or_else(|| Error::Other(anyhow::anyhow!("update {} lost its bundle", update.id)))?;
@@ -199,7 +274,7 @@ async fn manifest(
     });
 
     multipart_response(
-        &state,
+        state,
         &app,
         protocol,
         "manifest",

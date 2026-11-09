@@ -135,3 +135,32 @@ pub async fn checkin_series(db: &Db, app_id: &str, days: i64) -> Result<Vec<Chec
     .await?;
     Ok(rows)
 }
+
+/// Merge one device's reported outcome for an update (flags only ever go
+/// from 0 to 1).
+pub async fn record_outcome(
+    db: &Db,
+    app_id: &str,
+    update_id: &str,
+    client_id: &str,
+    o: crate::analytics::Outcome,
+) -> Result<()> {
+    let now = now_rfc3339();
+    sqlx::query(
+        "INSERT INTO client_updates (app_id, update_id, client_id, launched, failed, first_seen, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT(app_id, update_id, client_id) DO UPDATE SET
+           launched = max(launched, excluded.launched),
+           failed = max(failed, excluded.failed),
+           last_seen = excluded.last_seen",
+    )
+    .bind(app_id)
+    .bind(update_id)
+    .bind(client_id)
+    .bind(o.launched)
+    .bind(o.failed)
+    .bind(now)
+    .execute(db)
+    .await?;
+    Ok(())
+}

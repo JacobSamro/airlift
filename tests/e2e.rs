@@ -120,6 +120,22 @@ async fn manifest_request(
     protocol: &str,
     current_update_id: Option<&str>,
 ) -> reqwest::Response {
+    let mut extra = vec![("EAS-Client-ID", "test-device-1")];
+    if let Some(id) = current_update_id {
+        extra.push(("expo-current-update-id", id));
+    }
+    manifest_request_with(ctx, channel, runtime, platform, protocol, &extra).await
+}
+
+/// A protocol request with arbitrary extra headers (client id, failed ids…).
+async fn manifest_request_with(
+    ctx: &Ctx,
+    channel: &str,
+    runtime: &str,
+    platform: &str,
+    protocol: &str,
+    extra: &[(&str, &str)],
+) -> reqwest::Response {
     let mut req = ctx
         .http
         .get(format!("{}/u/{}/manifest", ctx.base, ctx.app_id))
@@ -130,10 +146,9 @@ async fn manifest_request(
         .header(
             "expo-expect-signature",
             "sig, keyid=\"main\", alg=\"rsa-v1_5-sha256\"",
-        )
-        .header("EAS-Client-ID", "test-device-1");
-    if let Some(id) = current_update_id {
-        req = req.header("expo-current-update-id", id);
+        );
+    for (k, v) in extra {
+        req = req.header(*k, *v);
     }
     req.send().await.unwrap()
 }
@@ -1040,4 +1055,68 @@ async fn single_platform_publish_keeps_the_other_platform_live() {
     assert_eq!(updates[0]["id"], body["group_id"]);
     assert_eq!(updates[0]["branch"], "production");
     assert_eq!(updates[0]["platforms"], json!(["android", "ios"]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn crashed_updates_are_never_reserved() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "ok")).await;
+    assert_eq!(status, 201);
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
+    let v1 = verified_part(&ctx, resp, "manifest").await;
+    let v1_id = v1["id"].as_str().unwrap().to_string();
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "bad")).await;
+    assert_eq!(status, 201);
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", Some(&v1_id)).await;
+    let v2 = verified_part(&ctx, resp, "manifest").await;
+    let v2_id = v2["id"].as_str().unwrap().to_string();
+
+    // The device crashed on v2 and fell back to v1: it reports v2 as failed.
+    let failed = format!("\"{v2_id}\"");
+    let resp = manifest_request_with(
+        &ctx,
+        "production",
+        "1.0.0",
+        "ios",
+        "1",
+        &[
+            ("EAS-Client-ID", "crashy"),
+            ("expo-current-update-id", &v1_id),
+            ("expo-recent-failed-update-ids", &failed),
+        ],
+    )
+    .await;
+    let remembered = resp.headers()["expo-server-defined-headers"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(remembered, format!("airlift-blocked-updates=\"{v2_id}\""));
+    let directive = verified_part(&ctx, resp, "directive").await;
+    assert_eq!(directive["type"], "noUpdateAvailable");
+
+    // Later the client's own failed list is gone, but it echoes the
+    // server-defined header back: v2 is still refused.
+    let resp = manifest_request_with(
+        &ctx,
+        "production",
+        "1.0.0",
+        "ios",
+        "1",
+        &[
+            ("EAS-Client-ID", "crashy"),
+            ("expo-current-update-id", &v1_id),
+            ("airlift-blocked-updates", &v2_id),
+        ],
+    )
+    .await;
+    let directive = verified_part(&ctx, resp, "directive").await;
+    assert_eq!(directive["type"], "noUpdateAvailable");
+
+    // Other devices still get v2.
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", Some(&v1_id)).await;
+    let m = verified_part(&ctx, resp, "manifest").await;
+    assert_eq!(m["id"].as_str().unwrap(), v2_id);
 }

@@ -22,6 +22,22 @@ pub struct ClientCheckin {
 type DailyKey = (String, String, String, String);
 /// One drained device check-in: ((app_id, client_id), latest state).
 type DrainedClient = ((String, String), ClientCheckin);
+/// Key for per-device update outcomes: (app_id, update_id, client_id).
+pub type OutcomeKey = (String, String, String);
+
+/// What a device has reported about one update since the last flush.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Outcome {
+    pub launched: bool,
+    pub failed: bool,
+}
+
+/// Drained collector contents.
+type Drained = (
+    Vec<DrainedClient>,
+    Vec<(DailyKey, u64)>,
+    Vec<(OutcomeKey, Outcome)>,
+);
 
 pub struct UsageCollector {
     enabled: bool,
@@ -29,6 +45,8 @@ pub struct UsageCollector {
     clients: DashMap<(String, String), ClientCheckin>,
     /// Daily manifest-request counters.
     daily: DashMap<DailyKey, u64>,
+    /// Per-device launch/failure outcomes (feeds per-update health).
+    outcomes: DashMap<OutcomeKey, Outcome>,
 }
 
 impl UsageCollector {
@@ -37,6 +55,7 @@ impl UsageCollector {
             enabled,
             clients: DashMap::new(),
             daily: DashMap::new(),
+            outcomes: DashMap::new(),
         }
     }
 
@@ -53,9 +72,26 @@ impl UsageCollector {
         embedded_update_id: Option<&str>,
         current_update_id: Option<&str>,
         served_update_id: &str,
+        failed_update_ids: &[String],
     ) {
         if !self.enabled {
             return;
+        }
+        if let Some(client_id) = client_id {
+            let mark = |update_id: &str, f: fn(&mut Outcome)| {
+                let key = (
+                    app_id.to_string(),
+                    update_id.to_ascii_lowercase(),
+                    client_id.to_string(),
+                );
+                f(&mut self.outcomes.entry(key).or_default());
+            };
+            if let Some(cur) = current_update_id {
+                mark(cur, |o| o.launched = true);
+            }
+            for id in failed_update_ids {
+                mark(id, |o| o.failed = true);
+            }
         }
         let day = now_rfc3339().chars().take(10).collect::<String>();
         *self
@@ -87,7 +123,7 @@ impl UsageCollector {
     /// per-key `remove` (copy-then-`clear` dropped check-ins recorded in
     /// between); anything recorded after its key was removed starts a fresh
     /// entry for the next flush.
-    fn drain(&self) -> (Vec<DrainedClient>, Vec<(DailyKey, u64)>) {
+    fn drain(&self) -> Drained {
         let client_keys: Vec<_> = self.clients.iter().map(|e| e.key().clone()).collect();
         let clients = client_keys
             .into_iter()
@@ -98,7 +134,12 @@ impl UsageCollector {
             .into_iter()
             .filter_map(|k| self.daily.remove(&k))
             .collect();
-        (clients, daily)
+        let outcome_keys: Vec<_> = self.outcomes.iter().map(|e| e.key().clone()).collect();
+        let outcomes = outcome_keys
+            .into_iter()
+            .filter_map(|k| self.outcomes.remove(&k))
+            .collect();
+        (clients, daily, outcomes)
     }
 }
 
@@ -114,7 +155,10 @@ pub async fn flush_loop(state: AppState, secs: u64) {
 }
 
 pub async fn flush_once(state: &AppState) -> crate::error::Result<()> {
-    let (clients, daily) = state.usage().drain();
+    let (clients, daily, outcomes) = state.usage().drain();
+    for ((app_id, update_id, client_id), o) in outcomes {
+        crate::db::clients::record_outcome(state.db(), &app_id, &update_id, &client_id, o).await?;
+    }
     for ((app_id, client_id), c) in clients {
         crate::db::clients::upsert_client(state.db(), &app_id, &client_id, &c).await?;
     }
