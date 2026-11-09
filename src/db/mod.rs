@@ -43,6 +43,11 @@ pub async fn connect(path: &Path) -> anyhow::Result<Db> {
     // connection is the standard high-throughput setup. Readers use WAL.
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
+        // Every connection reports writes to serving tables so the manifest
+        // cache invalidates no matter which code path wrote.
+        .after_connect(|conn, _meta| {
+            Box::pin(async move { crate::manifest_cache::install_hooks(conn).await })
+        })
         .connect_with(opts)
         .await?;
 

@@ -123,10 +123,6 @@ async fn manifest_inner(
     failed: &[String],
     blocked: &[String],
 ) -> Result<Response> {
-    let app = db::apps::find_by_id(state.db(), app_id)
-        .await?
-        .ok_or(Error::NotFound)?;
-
     let platform = param(headers, query, "expo-platform")
         .ok_or_else(|| Error::bad_request("missing expo-platform"))?;
     if !matches!(platform.as_str(), "ios" | "android") {
@@ -147,6 +143,22 @@ async fn manifest_inner(
     let expect_signature = param(headers, query, "expo-expect-signature").is_some();
     let client_id = param(headers, query, "eas-client-id");
     let embedded_update_id = param(headers, query, "expo-embedded-update-id");
+
+    // Everything about the channel's release (split sides, rollout sides,
+    // rendered manifests) comes from the cached plan; only the per-device
+    // choice happens here.
+    let base = crate::auth::base_url(state, headers);
+    let plan = crate::manifest_cache::plan(
+        state,
+        app_id,
+        &channel_name,
+        &runtime_version,
+        &platform,
+        &base,
+    )
+    .await?
+    .ok_or(Error::NotFound)?;
+    let app = &plan.app;
 
     // Off-hot-path accounting: bump the Prometheus counter and record the
     // device check-in (flushed to SQLite by the background loop).
@@ -171,200 +183,95 @@ async fn manifest_inner(
         );
     };
 
-    let channel = db::updates::find_channel(state.db(), &app.id, &channel_name)
-        .await?
-        .ok_or_else(|| Error::bad_request("unknown channel"))?;
-    // A/B split: a stable share of devices is served from another channel
-    // (the experiment branch). One hop only — the target's own split is not
-    // followed.
-    let channel = match (
-        &channel.split_channel_id,
-        channel.split_percent,
-        &channel.split_salt,
-    ) {
-        (Some(target), Some(pct), Some(salt))
-            if crate::rollout::included(client_id.as_deref(), salt, pct) =>
-        {
-            db::updates::find_channel_by_id(state.db(), target)
-                .await?
-                .unwrap_or(channel)
-        }
-        _ => channel,
-    };
-
-    // The release pointer is the source of truth, whether or not the channel
-    // tracks a branch (a branchless channel is served purely by promote).
-    // During a progressive rollout only devices bucketed inside get the new
-    // group; everyone else (incl. devices without a client id) keeps the last
-    // full release.
-    let (group, in_rollout) =
-        resolve_release(state, &channel.id, &runtime_version, client_id.as_deref()).await?;
-
-    let Some(group) = group else {
-        track("no_update", "");
-        return no_update_response(state, &app, protocol, expect_signature).await;
-    };
-
-    // A rollback group emits the protocol-1 directive; protocol-0 clients
-    // can't process directives, so they get "no update" semantics.
-    if group.group_type == "rollback_to_embedded" {
-        track("rollback", "");
+    // Protocol 1 answers "you're current" with a signed directive; protocol
+    // 0 has no directives, so it gets a 404-style JSON (matching the original
+    // expo updates server's behavior).
+    let no_update = || async {
         if protocol == 1 {
-            let directive = json!({
-                "type": "rollBackToEmbedded",
-                "parameters": { "commitTime": crate::util::normalize_rfc3339(&group.created_at) },
-            });
-            return multipart_response(
-                state,
-                &app,
+            signed_part(
+                app,
                 protocol,
                 "directive",
-                &directive,
+                &plan.no_update,
                 expect_signature,
+                None,
             )
-            .await;
+            .await
+        } else {
+            Ok(no_update_v0())
         }
-        return Ok(no_update_v0());
-    }
+    };
 
-    let updates = db::updates::updates_in_group(state.db(), &group.id).await?;
-    let Some(update) = updates.into_iter().find(|u| u.platform == platform) else {
-        track("no_update", "");
-        return no_update_response(state, &app, protocol, expect_signature).await;
+    // A/B split and progressive rollout bucketing (devices without a client
+    // id stay on the channel and on the last full release).
+    let pick = plan.pick(client_id.as_deref());
+    let (update_id, body, asset_keys) = match pick.serve {
+        None | Some(crate::manifest_cache::Serve::Nothing) => {
+            track("no_update", "");
+            return no_update().await;
+        }
+        // A rollback group emits the protocol-1 directive; protocol-0 clients
+        // can't process directives, so they get "no update" semantics.
+        Some(crate::manifest_cache::Serve::Rollback(directive)) => {
+            track("rollback", "");
+            if protocol == 1 {
+                return signed_part(
+                    app,
+                    protocol,
+                    "directive",
+                    directive,
+                    expect_signature,
+                    None,
+                )
+                .await;
+            }
+            return Ok(no_update_v0());
+        }
+        Some(crate::manifest_cache::Serve::Manifest {
+            update_id,
+            body,
+            asset_keys,
+        }) => (update_id, body, asset_keys),
     };
 
     // Never re-serve an update this device crashed on (or was told to
     // remember as crashed): it stays on whatever it runs now.
-    if blocked.contains(&update.id.to_ascii_lowercase()) {
+    if blocked.contains(update_id) {
         track("blocked", "");
-        return no_update_response(state, &app, protocol, expect_signature).await;
+        return no_update().await;
     }
-
     // The client is already running exactly this update. Attribute the
     // check-in to that update so adoption stats count settled devices.
-    if current_update_id.as_deref() == Some(&update.id.to_ascii_lowercase()) {
-        track("up_to_date", &update.id);
-        return no_update_response(state, &app, protocol, expect_signature).await;
+    if current_update_id.as_deref() == Some(update_id.as_str()) {
+        track("up_to_date", update_id);
+        return no_update().await;
     }
-    track("manifest", &update.id);
-
-    // ── build the manifest ──
-    let base = crate::auth::base_url(state, headers);
-    let launch = db::updates::launch_asset(state.db(), &update.id)
-        .await?
-        .ok_or_else(|| Error::Other(anyhow::anyhow!("update {} lost its bundle", update.id)))?;
-    let assets = db::updates::assets_for_update(state.db(), &update.id).await?;
-
-    let asset_url = |sha256: &str| format!("{base}/u/{}/assets/{}", app.id, sha256);
-    let assets_json: Vec<_> = assets
-        .iter()
-        .map(|a| {
-            json!({
-                "hash": hex_to_b64url(&a.sha256),
-                "key": a.key,
-                "fileExtension": a.file_extension.as_deref().map(|e| format!(".{}", e.trim_start_matches('.'))),
-                "contentType": a.content_type,
-                "url": asset_url(&a.sha256),
-            })
-        })
-        .collect();
-
-    let extra_expo_client: serde_json::Value = group
-        .expo_config_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or(serde_json::Value::Null);
-
-    let manifest = json!({
-        "id": update.id,
-        "createdAt": crate::util::normalize_rfc3339(&group.created_at),
-        "runtimeVersion": group.runtime_version,
-        "launchAsset": {
-            "hash": hex_to_b64url(&launch.sha256),
-            // expo-updates uses the key as the asset's unique id and skips the
-            // download when it already holds that key, so it must change with
-            // the content (the reference server uses the bundle's md5).
-            "key": format!("bundle-{}", launch.sha256),
-            "fileExtension": ".bundle",
-            "contentType": launch.content_type,
-            "url": asset_url(&launch.sha256),
-        },
-        "assets": assets_json,
-        "metadata": {},
-        "extra": { "expoClient": extra_expo_client },
-    });
+    track("manifest", update_id);
 
     // Rollout manifests pin EAS-Client-ID on every asset download, so the
     // asset endpoint can re-check rollout membership even if the client
     // wouldn't otherwise send the header there.
-    let mut asset_headers = serde_json::Map::new();
-    if let (true, Some(cid)) = (in_rollout, client_id.as_deref()) {
-        let pin = json!({ "EAS-Client-ID": cid });
-        asset_headers.insert(format!("bundle-{}", launch.sha256), pin.clone());
-        for a in &assets {
-            asset_headers.insert(a.key.clone(), pin.clone());
+    let asset_headers = match (pick.in_rollout, client_id.as_deref()) {
+        (true, Some(cid)) => {
+            let pin = json!({ "EAS-Client-ID": cid });
+            Some(
+                asset_keys
+                    .iter()
+                    .map(|k| (k.clone(), pin.clone()))
+                    .collect::<serde_json::Map<_, _>>(),
+            )
         }
-    }
-
-    multipart_response_with(
-        state,
-        &app,
+        _ => None,
+    };
+    signed_part(
+        app,
         protocol,
         "manifest",
-        &manifest,
+        body,
         expect_signature,
         asset_headers,
     )
     .await
-}
-
-/// The group this device should get on a channel/runtime, and whether it got
-/// it as part of a running rollout.
-async fn resolve_release(
-    state: &AppState,
-    channel_id: &str,
-    runtime_version: &str,
-    client_id: Option<&str>,
-) -> Result<(Option<db::updates::UpdateGroup>, bool)> {
-    let Some(r) = db::updates::release(state.db(), channel_id, runtime_version).await? else {
-        return Ok((None, false));
-    };
-    let (group_id, in_rollout) = match (r.rollout_percent, r.rollout_salt.as_deref()) {
-        (Some(p), Some(salt)) if crate::rollout::included(client_id, salt, p) => {
-            (Some(r.group_id), true)
-        }
-        (Some(_), _) => (r.previous_group_id, false),
-        (None, _) => (Some(r.group_id), false),
-    };
-    let group = match group_id {
-        Some(id) => db::updates::find_group(state.db(), &id).await?,
-        None => None,
-    };
-    Ok((group, in_rollout))
-}
-
-/// Protocol 1 answers "you're current" with a directive; protocol 0 has no
-/// directives, so it gets a 404-style JSON (matching the original expo
-/// updates server's behavior).
-async fn no_update_response(
-    state: &AppState,
-    app: &db::apps::App,
-    protocol: u8,
-    expect_signature: bool,
-) -> Result<Response> {
-    if protocol == 1 {
-        let directive = json!({ "type": "noUpdateAvailable" });
-        return multipart_response(
-            state,
-            app,
-            protocol,
-            "directive",
-            &directive,
-            expect_signature,
-        )
-        .await;
-    }
-    Ok(no_update_v0())
 }
 
 fn no_update_v0() -> Response {
@@ -375,70 +282,43 @@ fn no_update_v0() -> Response {
         .into_response()
 }
 
-/// Assemble the `multipart/mixed` protocol response with one JSON part
-/// (`manifest` or `directive`) plus the `extensions` part.
-async fn multipart_response(
-    state: &AppState,
+/// The `multipart/mixed` protocol response: one JSON part (`manifest` or
+/// `directive`, signed when the client asked) plus the `extensions` part.
+async fn signed_part(
     app: &db::apps::App,
     protocol: u8,
     part_name: &str,
-    part_json: &serde_json::Value,
+    part: &crate::manifest_cache::SignedBody,
     expect_signature: bool,
+    asset_request_headers: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Response> {
-    multipart_response_with(
-        state,
-        app,
-        protocol,
-        part_name,
-        part_json,
-        expect_signature,
-        serde_json::Map::new(),
-    )
-    .await
-}
-
-/// [`multipart_response`] with per-asset request headers in the extensions
-/// part (`assetRequestHeaders`: asset key → headers the client must send
-/// when downloading that asset).
-async fn multipart_response_with(
-    state: &AppState,
-    app: &db::apps::App,
-    protocol: u8,
-    part_name: &str,
-    part_json: &serde_json::Value,
-    expect_signature: bool,
-    asset_request_headers: serde_json::Map<String, serde_json::Value>,
-) -> Result<Response> {
-    let _ = state;
-    let body_json = serde_json::to_string(part_json)
-        .map_err(|e| Error::Other(anyhow::anyhow!("manifest serialize: {e}")))?;
-
     let signature = if expect_signature {
-        Some(sign_for_app(app, body_json.as_bytes().to_vec()).await?)
+        Some(part.signature(app).await?)
     } else {
         None
     };
 
     let boundary = format!("airlift-{}", uuid::Uuid::new_v4());
-    let mut body = String::new();
+    let mut body = String::with_capacity(part.body.len() + 512);
     body.push_str(&format!("--{boundary}\r\n"));
     body.push_str(&format!(
         "Content-Disposition: form-data; name=\"{part_name}\"\r\n"
     ));
     body.push_str("Content-Type: application/json\r\n");
-    if let Some(sig) = &signature {
+    if let Some(sig) = signature {
         body.push_str(&format!(
             "expo-signature: sig=\"{sig}\", keyid=\"main\"\r\n"
         ));
     }
     body.push_str("\r\n");
-    body.push_str(&body_json);
+    body.push_str(&part.body);
     body.push_str("\r\n");
 
     // Extensions part: asset request headers. Normally empty (assets are
     // public presigned redirects); a rollout manifest pins EAS-Client-ID on
     // every asset so the asset endpoint can apply the same rollout check.
-    let extensions = json!({ "assetRequestHeaders": asset_request_headers }).to_string();
+    let extensions =
+        json!({ "assetRequestHeaders": asset_request_headers.unwrap_or_default() }).to_string();
     body.push_str(&format!("--{boundary}\r\n"));
     body.push_str("Content-Disposition: form-data; name=\"extensions\"\r\n");
     body.push_str("Content-Type: application/json\r\n\r\n");
@@ -498,7 +378,7 @@ static SIGNERS: std::sync::LazyLock<
 
 /// Sign `bytes` with the app's key. RSA signing is CPU work, so it (and any
 /// key parse) runs on the blocking pool, not an async worker.
-async fn sign_for_app(app: &db::apps::App, bytes: Vec<u8>) -> Result<String> {
+pub(crate) async fn sign_for_app(app: &db::apps::App, bytes: Vec<u8>) -> Result<String> {
     let cached = SIGNERS
         .get(&app.id)
         .filter(|e| e.0 == app.private_key_pem)
@@ -522,7 +402,7 @@ async fn sign_for_app(app: &db::apps::App, bytes: Vec<u8>) -> Result<String> {
 
 /// Convert a stored hex sha256 into the base64url (no padding) form the
 /// protocol uses for asset hashes.
-fn hex_to_b64url(hex_digest: &str) -> String {
+pub(crate) fn hex_to_b64url(hex_digest: &str) -> String {
     let bytes = hex::decode(hex_digest).unwrap_or_default();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }

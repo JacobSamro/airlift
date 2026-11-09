@@ -8,6 +8,7 @@ mod db;
 mod error;
 mod gc;
 mod keys;
+mod manifest_cache;
 mod models;
 mod patches;
 mod protocol;

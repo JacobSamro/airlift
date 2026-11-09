@@ -768,6 +768,11 @@ async fn client_monitoring_and_metrics() {
         "{metrics}"
     );
     assert!(metrics.contains("airlift_publish_total"));
+    // Repeat check-ins are answered from the manifest cache.
+    assert!(
+        metrics.contains("airlift_manifest_cache_total{result=\"hit\"}"),
+        "{metrics}"
+    );
 
     // …but it lists every org's app slugs, so it isn't public.
     let resp = reqwest::get(format!("{}/metrics", ctx.base)).await.unwrap();
@@ -1321,4 +1326,86 @@ async fn ab_split_serves_two_branches_on_one_channel() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(offered(&ctx, Some(&b_side[0])).await.unwrap(), control);
+}
+
+/// Manifest hot-path latency under concurrency. Not part of the normal run:
+/// `cargo test --release --test e2e manifest_bench -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn manifest_bench() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    let (status, _) = publish(
+        &ctx,
+        "production",
+        "1.0.0",
+        export_zip(&["ios", "android"], "bench"),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    let total: usize = std::env::var("BENCH_REQUESTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20_000);
+    let concurrency = 32;
+    let url = format!("{}/u/{}/manifest", ctx.base, ctx.app_id);
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(concurrency)
+        .build()
+        .unwrap();
+    // Warm up (connections + cache).
+    for _ in 0..200 {
+        bench_request(&client, &url, 0).await;
+    }
+    let started = std::time::Instant::now();
+    let mut tasks = Vec::new();
+    for w in 0..concurrency {
+        let (client, url) = (client.clone(), url.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut lat = Vec::with_capacity(total / concurrency);
+            for i in 0..total / concurrency {
+                let t = std::time::Instant::now();
+                bench_request(&client, &url, w * 1_000_000 + i).await;
+                lat.push(t.elapsed());
+            }
+            lat
+        }));
+    }
+    let mut lat = Vec::new();
+    for t in tasks {
+        lat.extend(t.await.unwrap());
+    }
+    let elapsed = started.elapsed();
+    lat.sort();
+    let p = |q: f64| lat[((lat.len() as f64 * q) as usize).min(lat.len() - 1)];
+    println!(
+        "manifest bench: {} requests, concurrency {concurrency}: {:.0} req/s, p50 {:?}, p95 {:?}, p99 {:?}, max {:?}",
+        lat.len(),
+        lat.len() as f64 / elapsed.as_secs_f64(),
+        p(0.50),
+        p(0.95),
+        p(0.99),
+        lat[lat.len() - 1],
+    );
+}
+
+async fn bench_request(client: &reqwest::Client, url: &str, n: usize) {
+    let resp = client
+        .get(url)
+        .header("expo-platform", if n % 2 == 0 { "ios" } else { "android" })
+        .header("expo-runtime-version", "1.0.0")
+        .header("expo-channel-name", "production")
+        .header("expo-protocol-version", "1")
+        .header(
+            "expo-expect-signature",
+            "sig, keyid=\"main\", alg=\"rsa-v1_5-sha256\"",
+        )
+        .header("EAS-Client-ID", format!("bench-{n}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.bytes().await.unwrap();
 }
