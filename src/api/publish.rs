@@ -108,14 +108,22 @@ pub async fn publish(
     // ── parse the export archive ──
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))
         .map_err(|e| Error::bad_request(format!("archive is not a valid zip: {e}")))?;
+    // Decompressed-size budget: the body limit only bounds COMPRESSED bytes,
+    // so a tiny zip bomb could otherwise exhaust memory (and panic=abort
+    // takes the whole server down).
+    let max_body = state.config().server.max_body_bytes as u64;
+    let mut budget = UnzipBudget {
+        per_file: max_body,
+        remaining: max_body.saturating_mul(4),
+    };
     let metadata: ExportMetadata = {
-        let mut f = zip
-            .by_name("metadata.json")
-            .map_err(|_| Error::bad_request("archive is missing metadata.json"))?;
-        let mut s = String::new();
-        f.read_to_string(&mut s)
-            .map_err(|e| Error::bad_request(format!("metadata.json: {e}")))?;
-        serde_json::from_str(&s).map_err(|e| Error::bad_request(format!("metadata.json: {e}")))?
+        let mut meta_budget = UnzipBudget {
+            per_file: 16 * 1024 * 1024,
+            remaining: 16 * 1024 * 1024,
+        };
+        let bytes = read_zip_file(&mut zip, "metadata.json", &mut meta_budget)?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| Error::bad_request(format!("metadata.json: {e}")))?
     };
     if metadata.file_metadata.is_empty() {
         return Err(Error::bad_request("export contains no platforms"));
@@ -138,7 +146,7 @@ pub async fn publish(
     let mut content_hasher = Sha256::new();
 
     for (platform, pm) in &metadata.file_metadata {
-        let bundle_bytes = read_zip_file(&mut zip, &pm.bundle)?;
+        let bundle_bytes = read_zip_file(&mut zip, &pm.bundle, &mut budget)?;
         let launch =
             store_asset(&state, &app.org_id, bundle_bytes, "application/javascript").await?;
         content_hasher.update(platform.as_bytes());
@@ -146,7 +154,7 @@ pub async fn publish(
 
         let mut assets = Vec::with_capacity(pm.assets.len());
         for entry in &pm.assets {
-            let bytes = read_zip_file(&mut zip, &entry.path)?;
+            let bytes = read_zip_file(&mut zip, &entry.path, &mut budget)?;
             let content_type = mime_guess::from_ext(&entry.ext)
                 .first_or_octet_stream()
                 .to_string();
@@ -307,18 +315,37 @@ fn required(v: Option<String>, name: &str) -> Result<String> {
         .ok_or_else(|| Error::bad_request(format!("missing required field {name}")))
 }
 
+/// Caps on decompressed bytes: per entry, and across the whole archive.
+struct UnzipBudget {
+    per_file: u64,
+    remaining: u64,
+}
+
 fn read_zip_file(
     zip: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
     path: &str,
+    budget: &mut UnzipBudget,
 ) -> Result<Vec<u8>> {
-    let mut f = zip.by_name(path).map_err(|_| {
+    let f = zip.by_name(path).map_err(|_| {
         Error::bad_request(format!(
             "archive is missing {path} (listed in metadata.json)"
         ))
     })?;
-    let mut buf = Vec::with_capacity(f.size() as usize);
-    f.read_to_end(&mut buf)
+    let cap = budget.per_file.min(budget.remaining);
+    // The declared size is attacker-controlled: never trust it for
+    // allocation, and enforce the cap on the bytes actually inflated.
+    let too_big = || Error::bad_request(format!("{path} exceeds the decompressed size limit"));
+    if f.size() > cap {
+        return Err(too_big());
+    }
+    let mut buf = Vec::with_capacity(f.size().min(8 * 1024 * 1024) as usize);
+    f.take(cap + 1)
+        .read_to_end(&mut buf)
         .map_err(|e| Error::bad_request(format!("reading {path}: {e}")))?;
+    if buf.len() as u64 > cap {
+        return Err(too_big());
+    }
+    budget.remaining -= buf.len() as u64;
     Ok(buf)
 }
 
@@ -341,4 +368,36 @@ async fn store_asset(
     let size = bytes.len() as i64;
     state.storage().put(&key, bytes).await?;
     db::updates::ensure_asset(state.db(), org_id, &sha256, size, content_type).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    fn zip_with(name: &str, bytes: &[u8]) -> zip::ZipArchive<std::io::Cursor<Vec<u8>>> {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(bytes).unwrap();
+        let cur = w.finish().unwrap();
+        zip::ZipArchive::new(std::io::Cursor::new(cur.into_inner())).unwrap()
+    }
+
+    #[test]
+    fn unzip_budget_rejects_oversized_entries() {
+        let mut zip = zip_with("a.js", &vec![0u8; 4096]);
+        let mut budget = super::UnzipBudget {
+            per_file: 1024,
+            remaining: 1 << 20,
+        };
+        assert!(super::read_zip_file(&mut zip, "a.js", &mut budget).is_err());
+
+        let mut budget = super::UnzipBudget {
+            per_file: 1 << 20,
+            remaining: 1 << 20,
+        };
+        let bytes = super::read_zip_file(&mut zip, "a.js", &mut budget).unwrap();
+        assert_eq!(bytes.len(), 4096);
+        assert_eq!(budget.remaining, (1 << 20) - 4096);
+    }
 }
