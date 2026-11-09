@@ -12,8 +12,10 @@ appId: dev.airlift.e2e
       id: status
       text: "status:idle"
     timeout: 60000
+# Retry an undelivered tap (status always changes when it lands).
 - tapOn:
     id: check
+    retryTapIfNoChange: true
 - extendedWaitUntil:
     visible:
       id: status
