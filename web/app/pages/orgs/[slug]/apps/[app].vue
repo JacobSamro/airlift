@@ -238,6 +238,21 @@ async function submitPromote() {
   }
 }
 
+// ── Branch protection ──────────────────────────────────────────────────────
+
+async function setProtected(b: Branch, value: boolean) {
+  error.value = "";
+  try {
+    await api.put(
+      `/api/v1/orgs/${slug.value}/apps/${appSlug.value}/branches/${encodeURIComponent(b.name)}/protection`,
+      { protected: value },
+    );
+    await load();
+  } catch (e) {
+    error.value = apiErrorMessage(e);
+  }
+}
+
 // ── A/B splits ─────────────────────────────────────────────────────────────
 
 const splitChannel = ref<Channel | null>(null);
@@ -543,6 +558,36 @@ const gitRef = (u: UpdateGroup) =>
             </div>
           </UiCard>
         </div>
+      </div>
+
+      <!-- Branches -->
+      <div v-if="branches.length" class="mb-6">
+        <h2 class="mb-3 text-lg font-semibold tracking-tight">Branches</h2>
+        <UiCard>
+          <ul class="flex flex-col divide-y divide-border">
+            <li v-for="b in branches" :key="b.id" class="flex items-center justify-between gap-2 py-2 text-sm">
+              <span class="flex items-center gap-2">
+                <UiIcon name="branch" :size="14" class="text-muted-foreground" />
+                <span class="font-mono">{{ b.name }}</span>
+                <UiBadge v-if="b.protected" variant="primary">
+                  <UiIcon name="shield" :size="12" /> protected
+                </UiBadge>
+              </span>
+              <span class="flex items-center gap-2 text-xs text-muted-foreground">
+                Protect
+                <Switch
+                  :model-value="b.protected"
+                  :data-testid="`branch-protect-${b.name}`"
+                  @update:model-value="(v: boolean) => setProtected(b, v)"
+                />
+              </span>
+            </li>
+          </ul>
+          <p class="mt-2 text-xs text-muted-foreground">
+            Publishing to a protected branch, or releasing on a channel that serves one, requires the
+            <span class="font-mono">protected</span> capability (org admins, or a custom role with it).
+          </p>
+        </UiCard>
       </div>
 
       <!-- Updates timeline -->

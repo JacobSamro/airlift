@@ -14,7 +14,7 @@ use serde_json::json;
 use crate::auth::{rbac, ApiUser};
 use crate::db;
 use crate::error::{Error, Result};
-use crate::models::{OrgRole, Permission, TokenScope};
+use crate::models::{Capability, OrgRole, Permission, TokenScope};
 use crate::state::AppState;
 
 use super::{json_ok, valid_slug};
@@ -25,7 +25,7 @@ async fn resolve_app(
     caller: &ApiUser,
     org_slug: &str,
     app_slug: &str,
-    needed: Permission,
+    needed: Capability,
 ) -> Result<(db::orgs::Org, db::apps::App)> {
     let org = db::orgs::find_org_by_slug(state.db(), org_slug)
         .await?
@@ -35,6 +35,35 @@ async fn resolve_app(
         .ok_or(Error::NotFound)?;
     rbac::require(state.db(), caller, &app, needed).await?;
     Ok((org, app))
+}
+
+/// Branch protection: acting on a protected branch (publishing to it, or
+/// moving/configuring a channel that serves it) needs `protected`.
+pub(crate) async fn guard_protected(
+    state: &AppState,
+    caller: &ApiUser,
+    app: &db::apps::App,
+    protected: bool,
+) -> Result<()> {
+    if protected
+        && !rbac::app_caps(state.db(), caller, app)
+            .await?
+            .has(Capability::Protected)
+    {
+        return Err(Error::Forbidden);
+    }
+    Ok(())
+}
+
+/// [`guard_protected`] for a channel (its branch or split target's branch).
+async fn guard_channel(
+    state: &AppState,
+    caller: &ApiUser,
+    app: &db::apps::App,
+    ch: &db::updates::Channel,
+) -> Result<()> {
+    let protected = db::updates::channel_is_protected(state.db(), ch).await?;
+    guard_protected(state, caller, app, protected).await
 }
 
 // ───────────────────────── apps ─────────────────────────
@@ -59,7 +88,10 @@ pub async fn list_apps(
     // an app the caller has no grant on would leak its manifests.
     let mut apps = Vec::new();
     for app in db::apps::list(state.db(), &org.id).await? {
-        if rbac::app_permission(state.db(), &caller, &app).await? >= Permission::Read {
+        if rbac::app_caps(state.db(), &caller, &app)
+            .await?
+            .has(Capability::Read)
+        {
             apps.push(app);
         }
     }
@@ -134,7 +166,7 @@ pub async fn get_app(
     caller: ApiUser,
     Path((slug, app_slug)): Path<(String, String)>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Read).await?;
     let branches = db::updates::list_branches(state.db(), &app.id).await?;
     let channels = db::updates::list_channels(state.db(), &app.id).await?;
     let mut channel_views = Vec::with_capacity(channels.len());
@@ -193,7 +225,7 @@ pub async fn delete_app(
     caller: ApiUser,
     Path((slug, app_slug)): Path<(String, String)>,
 ) -> Result<Response> {
-    let (org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let (org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Channels).await?;
     // Only org owners may delete an app outright.
     let role = db::orgs::org_role(state.db(), &org.id, &caller.user.id).await?;
     if role != Some(OrgRole::Owner) && !caller.user.is_admin {
@@ -221,7 +253,7 @@ pub async fn get_certificate(
     Path((slug, app_slug)): Path<(String, String)>,
     Query(q): Query<CertQuery>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Read).await?;
     let keyid = q.keyid.as_deref().unwrap_or("main");
     let key = db::apps::signing_keys(state.db(), &app)
         .await?
@@ -262,7 +294,7 @@ pub async fn list_signing_keys(
     caller: ApiUser,
     Path((slug, app_slug)): Path<(String, String)>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Read).await?;
     let keys = db::apps::signing_keys(state.db(), &app).await?;
     Ok(json_ok(json!({ "keys": keys })))
 }
@@ -282,7 +314,7 @@ pub async fn create_signing_key(
     Path((slug, app_slug)): Path<(String, String)>,
     Json(req): Json<NewSigningKeyReq>,
 ) -> Result<Response> {
-    let (org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let (org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Keys).await?;
     let keyid = req.keyid.unwrap_or_else(|| {
         format!(
             "k{}",
@@ -350,7 +382,7 @@ pub async fn list_updates(
     Path((slug, app_slug)): Path<(String, String)>,
     Query(q): Query<ListUpdatesQuery>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Read).await?;
     let limit = q.limit.unwrap_or(30).clamp(1, 200);
 
     let branch_id = match &q.branch {
@@ -414,7 +446,7 @@ pub async fn app_stats(
     caller: ApiUser,
     Path((slug, app_slug)): Path<(String, String)>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Read).await?;
     let adoption = db::clients::adoption(state.db(), &app.id).await?;
     let series = db::clients::checkin_series(state.db(), &app.id, 30).await?;
     let total_devices: i64 = adoption.iter().map(|a| a.devices).sum();
@@ -431,7 +463,7 @@ pub async fn app_clients(
     caller: ApiUser,
     Path((slug, app_slug)): Path<(String, String)>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Read).await?;
     let clients = db::clients::list_clients(state.db(), &app.id, 200).await?;
     Ok(json_ok(json!({ "clients": clients })))
 }
@@ -456,7 +488,7 @@ pub async fn create_channel(
     Path((slug, app_slug)): Path<(String, String)>,
     Json(req): Json<CreateChannelReq>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Channels).await?;
     let name = req.name.trim();
     if name.is_empty() || name.len() > 64 {
         return Err(Error::bad_request("invalid channel name"));
@@ -495,15 +527,17 @@ pub async fn update_channel(
     Path((slug, app_slug, channel)): Path<(String, String, String)>,
     Json(req): Json<UpdateChannelReq>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Channels).await?;
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_channel(&state, &caller, &app, &ch).await?;
     let branch_id = match &req.branch {
         Some(b) => {
             let branch = db::updates::find_branch(state.db(), &app.id, b)
                 .await?
                 .ok_or_else(|| Error::bad_request("no such branch"))?;
+            guard_protected(&state, &caller, &app, branch.protected).await?;
             Some(branch.id)
         }
         None => None,
@@ -575,13 +609,14 @@ pub async fn set_split(
     Path((slug, app_slug, channel)): Path<(String, String, String)>,
     Json(req): Json<SplitReq>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Channels).await?;
     if !(req.percent.is_finite() && req.percent > 0.0 && req.percent < 100.0) {
         return Err(Error::bad_request("percent must be in (0, 100)"));
     }
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_channel(&state, &caller, &app, &ch).await?;
     let target = match (&req.channel, &req.branch) {
         (Some(name), None) => db::updates::find_channel(state.db(), &app.id, name)
             .await?
@@ -612,6 +647,7 @@ pub async fn set_split(
     if target.id == ch.id {
         return Err(Error::bad_request("a channel can't split to itself"));
     }
+    guard_channel(&state, &caller, &app, &target).await?;
     db::updates::set_split(state.db(), &ch, Some((&target.id, req.percent))).await?;
     db::audit::record(
         state.db(),
@@ -636,10 +672,11 @@ pub async fn clear_split(
     caller: ApiUser,
     Path((slug, app_slug, channel)): Path<(String, String, String)>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Channels).await?;
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_channel(&state, &caller, &app, &ch).await?;
     db::updates::set_split(state.db(), &ch, None).await?;
     db::audit::record(
         state.db(),
@@ -659,10 +696,11 @@ pub async fn delete_channel(
     caller: ApiUser,
     Path((slug, app_slug, channel)): Path<(String, String, String)>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Admin).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Channels).await?;
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_channel(&state, &caller, &app, &ch).await?;
     db::updates::delete_channel(state.db(), &app.id, &ch.id).await?;
     Ok(json_ok(json!({ "ok": true })))
 }
@@ -682,10 +720,11 @@ pub async fn promote(
     Path((slug, app_slug, channel)): Path<(String, String, String)>,
     Json(req): Json<PromoteReq>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Release).await?;
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_channel(&state, &caller, &app, &ch).await?;
     let group = db::updates::find_group(state.db(), &req.group_id)
         .await?
         .ok_or_else(|| Error::bad_request("no such update group"))?;
@@ -731,11 +770,12 @@ pub async fn start_rollout(
     Path((slug, app_slug, channel)): Path<(String, String, String)>,
     Json(req): Json<StartRolloutReq>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Release).await?;
     let pct = valid_percent(req.percent)?;
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_channel(&state, &caller, &app, &ch).await?;
     let group = db::updates::find_group(state.db(), &req.group_id)
         .await?
         .ok_or_else(|| Error::bad_request("no such update group"))?;
@@ -787,11 +827,12 @@ pub async fn set_rollout(
     Path((slug, app_slug, channel)): Path<(String, String, String)>,
     Json(req): Json<SetRolloutReq>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Release).await?;
     let pct = valid_percent(req.percent)?;
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_channel(&state, &caller, &app, &ch).await?;
     if !db::updates::set_rollout_percent(state.db(), &ch.id, &req.runtime_version, pct).await? {
         return Err(Error::bad_request(
             "no rollout is running on this channel for that runtime version",
@@ -839,7 +880,7 @@ pub async fn republish(
     Path((slug, app_slug, group_id)): Path<(String, String, String)>,
     body: Option<Json<RepublishReq>>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Publish).await?;
     let req = body.map(|Json(r)| r).unwrap_or_default();
     let group = db::updates::find_group(state.db(), &group_id)
         .await?
@@ -849,13 +890,23 @@ pub async fn republish(
         .into_iter()
         .find(|b| b.id == group.branch_id)
         .ok_or(Error::NotFound)?;
-    let copy = db::updates::republish_group(state.db(), &group).await?;
-    let mut tx = state.db().begin_with("BEGIN IMMEDIATE").await?;
-    let released = match &req.channel {
+    guard_protected(&state, &caller, &app, branch.protected).await?;
+    // Releasing the copy to a named channel is a release action on it.
+    let target = match &req.channel {
         Some(name) => {
-            let ch = db::updates::find_channel(&mut *tx, &app.id, name)
+            let ch = db::updates::find_channel(state.db(), &app.id, name)
                 .await?
                 .ok_or_else(|| Error::bad_request("no such channel"))?;
+            rbac::require(state.db(), &caller, &app, Capability::Release).await?;
+            guard_channel(&state, &caller, &app, &ch).await?;
+            Some(ch)
+        }
+        None => None,
+    };
+    let copy = db::updates::republish_group(state.db(), &group).await?;
+    let mut tx = state.db().begin_with("BEGIN IMMEDIATE").await?;
+    let released = match target {
+        Some(ch) => {
             db::updates::set_channel_release_tx(&mut tx, &ch.id, &copy.runtime_version, &copy.id)
                 .await?;
             vec![json!({ "channel": ch.name, "status": "released" })]
@@ -899,10 +950,11 @@ pub async fn rollback(
     Path((slug, app_slug, channel)): Path<(String, String, String)>,
     Json(req): Json<RollbackReq>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Release).await?;
     let ch = db::updates::find_channel(state.db(), &app.id, &channel)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_channel(&state, &caller, &app, &ch).await?;
     db::updates::channel_release(state.db(), &ch.id, &req.runtime_version)
         .await?
         .ok_or_else(|| Error::bad_request("channel has no release for this runtime version"))?;
@@ -949,10 +1001,11 @@ pub async fn rollback_to_embedded(
     Path((slug, app_slug, branch)): Path<(String, String, String)>,
     Json(req): Json<RollbackToEmbeddedReq>,
 ) -> Result<Response> {
-    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Publish).await?;
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Release).await?;
     let branch = db::updates::find_branch(state.db(), &app.id, &branch)
         .await?
         .ok_or(Error::NotFound)?;
+    guard_protected(&state, &caller, &app, branch.protected).await?;
     let mut tx = state.db().begin_with("BEGIN IMMEDIATE").await?;
     let group = db::updates::create_group(
         &mut *tx,
@@ -980,5 +1033,48 @@ pub async fn rollback_to_embedded(
     .ok();
     Ok(json_ok(
         json!({ "ok": true, "group_id": group.id, "channels": released }),
+    ))
+}
+
+// ───────────────────────── branch protection ─────────────────────────
+
+#[derive(Deserialize)]
+pub struct ProtectionReq {
+    protected: bool,
+}
+
+/// Protect (or unprotect) a branch. Protecting a branch that hasn't been
+/// published to yet creates it, so `production` can be locked down first.
+pub async fn set_branch_protection(
+    State(state): State<AppState>,
+    caller: ApiUser,
+    Path((slug, app_slug, branch)): Path<(String, String, String)>,
+    Json(req): Json<ProtectionReq>,
+) -> Result<Response> {
+    let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Capability::Protected).await?;
+    // Configuring branches is also channel administration.
+    rbac::require(state.db(), &caller, &app, Capability::Channels).await?;
+    let name = branch.trim();
+    if name.is_empty() || name.len() > 64 {
+        return Err(Error::bad_request("invalid branch name"));
+    }
+    let branch = db::updates::ensure_branch(state.db(), &app.id, name).await?;
+    db::updates::set_branch_protected(state.db(), &branch.id, req.protected).await?;
+    db::audit::record(
+        state.db(),
+        Some(&caller.user.id),
+        Some(&app.org_id),
+        if req.protected {
+            "branch.protect"
+        } else {
+            "branch.unprotect"
+        },
+        Some(&format!("{}/{}", app.slug, branch.name)),
+        None,
+    )
+    .await
+    .ok();
+    Ok(json_ok(
+        json!({ "ok": true, "branch": branch.name, "protected": req.protected }),
     ))
 }

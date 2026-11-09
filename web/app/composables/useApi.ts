@@ -51,6 +51,8 @@ export interface Branch {
   id: string;
   name: string;
   created_at: string;
+  /** Publishing / releasing here needs the `protected` capability. */
+  protected: boolean;
 }
 export interface ChannelRelease {
   runtime_version: string;

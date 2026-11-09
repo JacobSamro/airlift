@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::{rbac, ApiUser};
 use crate::db;
 use crate::error::{Error, Result};
-use crate::models::Permission;
+use crate::models::Capability;
 use crate::state::AppState;
 
 /// `metadata.json` inside an `expo export` output directory.
@@ -61,7 +61,7 @@ pub async fn publish(
     let app = db::apps::find_by_id(state.db(), &app_id)
         .await?
         .ok_or(Error::NotFound)?;
-    rbac::require(state.db(), &caller, &app, Permission::Publish).await?;
+    let caps = rbac::require(state.db(), &caller, &app, Capability::Publish).await?;
 
     // ── collect form fields ──
     let mut branch_name = None;
@@ -212,6 +212,10 @@ pub async fn publish(
 
     // ── create the group (refusing a byte-identical republish of the head) ──
     let branch = db::updates::ensure_branch(state.db(), &app.id, &branch_name).await?;
+    // Branch protection: only callers with `protected` may publish here.
+    if branch.protected && !caps.has(Capability::Protected) {
+        return Err(Error::Forbidden);
+    }
 
     // Everything from the duplicate check to the channel advance is one
     // IMMEDIATE transaction: a failure can't leave a half-built group at the

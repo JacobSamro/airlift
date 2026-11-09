@@ -1543,3 +1543,158 @@ async fn republish_reships_an_old_update_as_new() {
     assert_ne!(m["id"], good["id"]);
     assert!(m["createdAt"].as_str().unwrap() > good["createdAt"].as_str().unwrap());
 }
+
+/// Create a user, sign them in, return their cookie client.
+async fn login_as(ctx: &Ctx, username: &str) -> reqwest::Client {
+    let resp = ctx
+        .http
+        .post(format!("{}/api/v1/users", ctx.base))
+        .json(&json!({
+            "email": format!("{username}@example.com"),
+            "username": username,
+            "password": "password123",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let client = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("{}/api/v1/auth/login", ctx.base))
+        .json(&json!({ "login": username, "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    client
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_roles_and_branch_protection() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    let (status, b1) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "r1")).await;
+    assert_eq!(status, 201);
+    let g1 = b1["group_id"].as_str().unwrap().to_string();
+
+    let admin = |method: reqwest::Method, path: &str, body: Value| {
+        ctx.http
+            .request(method, format!("{}{path}", ctx.base))
+            .json(&body)
+            .send()
+    };
+    use reqwest::Method;
+    // A "releaser" custom role: may move channel pointers, nothing else.
+    let resp = admin(
+        Method::PUT,
+        "/api/v1/orgs/acme/roles/releaser",
+        json!({ "capabilities": ["release"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let rel = login_as(&ctx, "rel").await;
+    admin(
+        Method::POST,
+        "/api/v1/orgs/acme/members",
+        json!({ "login": "rel", "role": "member" }),
+    )
+    .await
+    .unwrap();
+    admin(
+        Method::POST,
+        "/api/v1/orgs/acme/teams",
+        json!({ "slug": "release", "name": "Release" }),
+    )
+    .await
+    .unwrap();
+    admin(
+        Method::POST,
+        "/api/v1/orgs/acme/teams/release/members",
+        json!({ "login": "rel" }),
+    )
+    .await
+    .unwrap();
+    let resp = admin(
+        Method::POST,
+        "/api/v1/orgs/acme/teams/release/perms",
+        json!({ "app": "mobile", "permission": "role:releaser" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let promote = |client: reqwest::Client| {
+        let url = format!(
+            "{}/api/v1/orgs/acme/apps/mobile/channels/production/promote",
+            ctx.base
+        );
+        let g = g1.clone();
+        async move {
+            client
+                .post(url)
+                .json(&json!({ "group_id": g }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    // The role covers release but not channel administration.
+    assert_eq!(promote(rel.clone()).await.status(), 200);
+    let resp = rel
+        .post(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/channels",
+            ctx.base
+        ))
+        .json(&json!({ "name": "beta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // Protect production: release on it now needs `protected`.
+    let resp = admin(
+        Method::PUT,
+        "/api/v1/orgs/acme/apps/mobile/branches/production/protection",
+        json!({ "protected": true }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert_eq!(promote(rel.clone()).await.status(), 403);
+    // …and so does publishing there, even for a publish-level token.
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "r2")).await;
+    assert_eq!(status, 403);
+
+    // Granting the role `protected` restores it.
+    admin(
+        Method::PUT,
+        "/api/v1/orgs/acme/roles/releaser",
+        json!({ "capabilities": ["release", "protected"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(promote(rel.clone()).await.status(), 200);
+
+    // Unknown capabilities and unknown roles are rejected.
+    let resp = admin(
+        Method::PUT,
+        "/api/v1/orgs/acme/roles/bad",
+        json!({ "capabilities": ["fly"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = admin(
+        Method::POST,
+        "/api/v1/orgs/acme/teams/release/perms",
+        json!({ "app": "mobile", "permission": "role:ghost" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+}

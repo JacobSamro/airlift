@@ -118,6 +118,15 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/orgs/{slug}/teams/{team}/perms",
             get(team_perms).post(set_team_perm),
         )
+        .route("/api/v1/orgs/{slug}/roles", get(list_roles))
+        .route(
+            "/api/v1/orgs/{slug}/roles/{name}",
+            axum::routing::put(put_role).delete(delete_role),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/branches/{branch}/protection",
+            axum::routing::put(apps::set_branch_protection),
+        )
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{id}", axum::routing::delete(delete_token))
         .route("/api/v1/domains", get(list_domains).post(add_domain))
@@ -790,13 +799,108 @@ async fn set_team_perm(
     let team = db::orgs::find_team(state.db(), &org.id, &team)
         .await?
         .ok_or(Error::NotFound)?;
-    if crate::models::Permission::parse(&req.permission).is_none() {
-        return Err(Error::bad_request("invalid permission"));
+    // A built-in level, or `role:<name>` for one of the org's custom roles.
+    let valid = match req.permission.strip_prefix("role:") {
+        Some(name) => db::orgs::list_roles(state.db(), &org.id)
+            .await?
+            .iter()
+            .any(|r| r.name == name),
+        None => crate::models::Permission::parse(&req.permission).is_some(),
+    };
+    if !valid {
+        return Err(Error::bad_request(
+            "invalid permission (read|publish|admin|role:<custom role>)",
+        ));
     }
     let app = db::apps::find_by_slug(state.db(), &org.id, &req.app)
         .await?
         .ok_or_else(|| Error::bad_request("no such app"))?;
     db::orgs::set_team_app_perm(state.db(), &team.id, &app.id, &req.permission).await?;
+    Ok(json_ok(json!({ "ok": true })))
+}
+
+// ───────────────────────── custom roles ─────────────────────────
+
+async fn list_roles(
+    State(state): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path(slug): Path<String>,
+) -> Result<Response> {
+    let (org, _) = member_of(&state, &user.id, &slug).await?;
+    let roles = db::orgs::list_roles(state.db(), &org.id).await?;
+    let capabilities: Vec<_> = crate::models::Capability::ALL
+        .iter()
+        .map(|c| c.as_str())
+        .collect();
+    Ok(json_ok(
+        json!({ "roles": roles, "capabilities": capabilities }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PutRoleReq {
+    capabilities: Vec<String>,
+}
+
+/// Create or replace a custom role: a named set of app capabilities that
+/// team grants can use (`role:<name>`).
+async fn put_role(
+    State(state): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path((slug, name)): Path<(String, String)>,
+    Json(req): Json<PutRoleReq>,
+) -> Result<Response> {
+    let (org, _) = admin_of(&state, &user.id, &slug).await?;
+    if !valid_slug(&name) {
+        return Err(Error::bad_request(
+            "invalid role name (lowercase letters, digits, hyphens)",
+        ));
+    }
+    if matches!(name.as_str(), "read" | "publish" | "admin" | "none") {
+        return Err(Error::bad_request("that name is a built-in level"));
+    }
+    let caps = crate::models::Caps::from_names(&req.capabilities)
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| {
+            Error::bad_request(
+                "capabilities: non-empty list of read|publish|release|channels|keys|protected",
+            )
+        })?;
+    db::orgs::upsert_role(state.db(), &org.id, &name, caps).await?;
+    db::audit::record(
+        state.db(),
+        Some(&user.id),
+        Some(&org.id),
+        "role.put",
+        Some(&name),
+        Some(&caps.names().join(",")),
+    )
+    .await
+    .ok();
+    Ok(json_ok(
+        json!({ "ok": true, "name": name, "capabilities": caps.names() }),
+    ))
+}
+
+async fn delete_role(
+    State(state): State<AppState>,
+    SessionUser(user): SessionUser,
+    Path((slug, name)): Path<(String, String)>,
+) -> Result<Response> {
+    let (org, _) = admin_of(&state, &user.id, &slug).await?;
+    if !db::orgs::delete_role(state.db(), &org.id, &name).await? {
+        return Err(Error::NotFound);
+    }
+    db::audit::record(
+        state.db(),
+        Some(&user.id),
+        Some(&org.id),
+        "role.delete",
+        Some(&name),
+        None,
+    )
+    .await
+    .ok();
     Ok(json_ok(json!({ "ok": true })))
 }
 

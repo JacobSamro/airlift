@@ -14,6 +14,8 @@ pub struct Branch {
     pub app_id: String,
     pub name: String,
     pub created_at: String,
+    /// Publishing here / releasing on channels serving it needs `protected`.
+    pub protected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -984,4 +986,28 @@ pub async fn releases_for_channel(db: &Db, channel_id: &str) -> Result<Vec<Relea
     .fetch_all(db)
     .await?;
     Ok(rows)
+}
+
+pub async fn set_branch_protected(db: &Db, branch_id: &str, protected: bool) -> Result<()> {
+    sqlx::query("UPDATE branches SET protected = ? WHERE id = ?")
+        .bind(protected)
+        .bind(branch_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Whether a channel currently serves a protected branch (its own branch or
+/// its A/B split target's).
+pub async fn channel_is_protected(db: &Db, channel: &Channel) -> Result<bool> {
+    let (protected,): (i64,) = sqlx::query_as(
+        "SELECT EXISTS(
+            SELECT 1 FROM branches b WHERE b.protected = 1 AND (
+                b.id = ?1 OR b.id = (SELECT c.branch_id FROM channels c WHERE c.id = ?2)))",
+    )
+    .bind(&channel.branch_id)
+    .bind(&channel.split_channel_id)
+    .fetch_one(db)
+    .await?;
+    Ok(protected != 0)
 }

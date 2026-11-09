@@ -75,44 +75,6 @@ pub async fn org_role(db: &Db, org_id: &str, user_id: &str) -> Result<Option<Org
     Ok(row.and_then(|r| OrgRole::parse(&r.0)))
 }
 
-/// The highest permission `user_id` has on an existing app, combining the
-/// org-level role (owner/admin ⇒ admin) with any team grants on that app.
-#[allow(dead_code)]
-pub async fn app_permission(
-    db: &Db,
-    app_id: &str,
-    org_id: &str,
-    user_id: &str,
-) -> Result<Permission> {
-    if let Some(role) = org_role(db, org_id, user_id).await? {
-        if role >= OrgRole::Admin {
-            return Ok(Permission::Admin);
-        }
-    } else {
-        // Not a member of the org → no access at all.
-        return Ok(Permission::None);
-    }
-
-    // Member: take the max team grant on this app.
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT tap.permission
-         FROM team_app_perms tap
-         JOIN team_members tm ON tm.team_id = tap.team_id
-         WHERE tap.app_id = ? AND tm.user_id = ?",
-    )
-    .bind(app_id)
-    .bind(user_id)
-    .fetch_all(db)
-    .await?;
-
-    let perm = rows
-        .iter()
-        .filter_map(|(p,)| Permission::parse(p))
-        .max()
-        .unwrap_or(Permission::None);
-    Ok(perm)
-}
-
 // ───────────────────────── dashboard queries ─────────────────────────
 
 /// Orgs a user belongs to, paired with their role, most-recent first.
@@ -364,4 +326,123 @@ pub async fn org_stats(db: &Db, org_id: &str) -> Result<OrgStats> {
         members,
         teams,
     })
+}
+
+// ───────────────────────── custom roles ─────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomRole {
+    pub name: String,
+    pub capabilities: Vec<&'static str>,
+    pub created_at: String,
+}
+
+pub async fn list_roles(db: &Db, org_id: &str) -> Result<Vec<CustomRole>> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT name, capabilities, created_at FROM org_roles WHERE org_id = ? ORDER BY name",
+    )
+    .bind(org_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, caps, created_at)| CustomRole {
+            name,
+            capabilities: parse_caps(&caps).names(),
+            created_at,
+        })
+        .collect())
+}
+
+fn parse_caps(stored: &str) -> crate::models::Caps {
+    let names: Vec<&str> = stored.split(',').filter(|s| !s.is_empty()).collect();
+    crate::models::Caps::from_names(&names).unwrap_or_default()
+}
+
+pub async fn upsert_role(
+    db: &Db,
+    org_id: &str,
+    name: &str,
+    caps: crate::models::Caps,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO org_roles (org_id, name, capabilities, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(org_id, name) DO UPDATE SET capabilities = excluded.capabilities",
+    )
+    .bind(org_id)
+    .bind(name)
+    .bind(caps.names().join(","))
+    .bind(crate::util::now_rfc3339())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Delete a role; grants that used it are removed too (they'd grant
+/// nothing). Returns whether the role existed.
+pub async fn delete_role(db: &Db, org_id: &str, name: &str) -> Result<bool> {
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "DELETE FROM team_app_perms WHERE permission = ?
+           AND team_id IN (SELECT id FROM teams WHERE org_id = ?)",
+    )
+    .bind(format!("role:{name}"))
+    .bind(org_id)
+    .execute(&mut *tx)
+    .await?;
+    let res = sqlx::query("DELETE FROM org_roles WHERE org_id = ? AND name = ?")
+        .bind(org_id)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// The capability set a stored team grant stands for: a built-in level
+/// (`read` | `publish` | `admin`) or `role:<name>` (an org custom role).
+pub async fn grant_caps(db: &Db, org_id: &str, grant: &str) -> Result<crate::models::Caps> {
+    if let Some(level) = Permission::parse(grant) {
+        return Ok(crate::models::Caps::of_level(level));
+    }
+    let Some(name) = grant.strip_prefix("role:") else {
+        return Ok(crate::models::Caps::NONE);
+    };
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT capabilities FROM org_roles WHERE org_id = ? AND name = ?")
+            .bind(org_id)
+            .bind(name)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.map(|(c,)| parse_caps(&c)).unwrap_or_default())
+}
+
+/// What `user_id` may do on an app: org owner/admin ⇒ everything; a member
+/// gets the union of their teams' grants on it (levels or custom roles).
+pub async fn app_capabilities(
+    db: &Db,
+    app_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Result<crate::models::Caps> {
+    match org_role(db, org_id, user_id).await? {
+        None => return Ok(crate::models::Caps::NONE),
+        Some(role) if role >= OrgRole::Admin => return Ok(crate::models::Caps::ALL),
+        Some(_) => {}
+    }
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT tap.permission
+         FROM team_app_perms tap
+         JOIN team_members tm ON tm.team_id = tap.team_id
+         WHERE tap.app_id = ? AND tm.user_id = ?",
+    )
+    .bind(app_id)
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+    let mut caps = crate::models::Caps::NONE;
+    for (grant,) in rows {
+        caps = caps.union(grant_caps(db, org_id, &grant).await?);
+    }
+    Ok(caps)
 }
