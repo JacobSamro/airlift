@@ -1024,4 +1024,20 @@ async fn single_platform_publish_keeps_the_other_platform_live() {
         android_after["launchAsset"]["hash"],
         android_before["launchAsset"]["hash"]
     );
+
+    // The timeline lists both groups newest-first, with their platforms.
+    let v: Value = ctx
+        .http
+        .get(format!("{}/api/v1/orgs/acme/apps/mobile/updates", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let updates = v["updates"].as_array().unwrap();
+    assert_eq!(updates.len(), 2, "{v}");
+    assert_eq!(updates[0]["id"], body["group_id"]);
+    assert_eq!(updates[0]["branch"], "production");
+    assert_eq!(updates[0]["platforms"], json!(["android", "ios"]));
 }

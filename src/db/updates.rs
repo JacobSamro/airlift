@@ -426,37 +426,44 @@ pub async fn find_group(db: &Db, group_id: &str) -> Result<Option<UpdateGroup>> 
     Ok(g)
 }
 
-/// Recent groups on a branch (newest first), optionally filtered by runtime.
-pub async fn groups_for_branch(
+/// One row of the updates timeline: a group plus its branch name and the
+/// platforms it covers (comma-separated, sorted).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct GroupListing {
+    #[sqlx(flatten)]
+    pub group: UpdateGroup,
+    pub branch_name: String,
+    pub platforms: Option<String>,
+}
+
+/// Recent groups of an app across its branches (newest first), optionally
+/// narrowed to one branch and/or runtime — one statement instead of a query
+/// per branch plus one per group.
+pub async fn list_groups(
     db: &Db,
-    branch_id: &str,
+    app_id: &str,
+    branch_id: Option<&str>,
     runtime_version: Option<&str>,
     limit: i64,
-) -> Result<Vec<UpdateGroup>> {
-    let g = match runtime_version {
-        Some(rv) => {
-            sqlx::query_as::<_, UpdateGroup>(
-                "SELECT * FROM update_groups WHERE branch_id = ? AND runtime_version = ?
-                 ORDER BY created_at DESC, id DESC LIMIT ?",
-            )
-            .bind(branch_id)
-            .bind(rv)
-            .bind(limit)
-            .fetch_all(db)
-            .await?
-        }
-        None => {
-            sqlx::query_as::<_, UpdateGroup>(
-                "SELECT * FROM update_groups WHERE branch_id = ?
-                 ORDER BY created_at DESC, id DESC LIMIT ?",
-            )
-            .bind(branch_id)
-            .bind(limit)
-            .fetch_all(db)
-            .await?
-        }
-    };
-    Ok(g)
+) -> Result<Vec<GroupListing>> {
+    let rows = sqlx::query_as::<_, GroupListing>(
+        "SELECT g.*, b.name AS branch_name,
+                (SELECT group_concat(platform, ',') FROM
+                    (SELECT platform FROM updates u WHERE u.group_id = g.id ORDER BY platform)
+                ) AS platforms
+         FROM update_groups g JOIN branches b ON b.id = g.branch_id
+         WHERE b.app_id = ?1
+           AND (?2 IS NULL OR g.branch_id = ?2)
+           AND (?3 IS NULL OR g.runtime_version = ?3)
+         ORDER BY g.created_at DESC, g.id DESC LIMIT ?4",
+    )
+    .bind(app_id)
+    .bind(branch_id)
+    .bind(runtime_version)
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
 }
 
 /// Look up an update by id, confined to one app.

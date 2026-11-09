@@ -250,44 +250,39 @@ pub async fn list_updates(
     let (_org, app) = resolve_app(&state, &caller, &slug, &app_slug, Permission::Read).await?;
     let limit = q.limit.unwrap_or(30).clamp(1, 200);
 
-    let branches = match &q.branch {
-        Some(name) => vec![db::updates::find_branch(state.db(), &app.id, name)
-            .await?
-            .ok_or(Error::NotFound)?],
-        None => db::updates::list_branches(state.db(), &app.id).await?,
+    let branch_id = match &q.branch {
+        Some(name) => Some(
+            db::updates::find_branch(state.db(), &app.id, name)
+                .await?
+                .ok_or(Error::NotFound)?
+                .id,
+        ),
+        None => None,
     };
 
-    let mut groups_json = Vec::new();
-    for branch in &branches {
-        let groups =
-            db::updates::groups_for_branch(state.db(), &branch.id, q.runtime.as_deref(), limit)
-                .await?;
-        for g in groups {
-            groups_json.push(group_json(&state, &branch.name, &g).await?);
-        }
-    }
-    // Interleaved branches: sort newest-first overall.
-    groups_json.sort_by(|a, b| {
-        b["created_at"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(a["created_at"].as_str().unwrap_or(""))
-    });
-    groups_json.truncate(limit as usize);
+    let rows = db::updates::list_groups(
+        state.db(),
+        &app.id,
+        branch_id.as_deref(),
+        q.runtime.as_deref(),
+        limit,
+    )
+    .await?;
+    let groups_json: Vec<_> = rows.iter().map(group_json).collect();
     Ok(json_ok(json!({ "updates": groups_json })))
 }
 
 /// Dashboard/CLI-facing JSON for one update group.
-pub(crate) async fn group_json(
-    state: &AppState,
-    branch_name: &str,
-    g: &db::updates::UpdateGroup,
-) -> Result<serde_json::Value> {
-    let updates = db::updates::updates_in_group(state.db(), &g.id).await?;
-    let platforms: Vec<_> = updates.iter().map(|u| u.platform.clone()).collect();
-    Ok(json!({
+fn group_json(row: &db::updates::GroupListing) -> serde_json::Value {
+    let g = &row.group;
+    let platforms: Vec<&str> = row
+        .platforms
+        .as_deref()
+        .map(|p| p.split(',').collect())
+        .unwrap_or_default();
+    json!({
         "id": g.id,
-        "branch": branch_name,
+        "branch": row.branch_name,
         "runtime_version": g.runtime_version,
         "message": g.message,
         "git_branch": g.git_branch,
@@ -295,7 +290,7 @@ pub(crate) async fn group_json(
         "group_type": g.group_type,
         "platforms": platforms,
         "created_at": g.created_at,
-    }))
+    })
 }
 
 // ───────────────────────── monitoring ─────────────────────────
