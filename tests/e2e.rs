@@ -933,3 +933,61 @@ async fn org_admins_cannot_take_over_ownership() {
         .unwrap();
     assert_eq!(resp.status(), 400);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn members_only_list_apps_they_can_read() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    let resp = ctx
+        .http
+        .post(format!("{}/api/v1/users", ctx.base))
+        .json(&json!({ "email": "mo@example.com", "username": "mo", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let resp = ctx
+        .http
+        .post(format!("{}/api/v1/orgs/acme/members", ctx.base))
+        .json(&json!({ "login": "mo", "role": "member" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let mo = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .unwrap();
+    let resp = mo
+        .post(format!("{}/api/v1/auth/login", ctx.base))
+        .json(&json!({ "login": "mo", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // A plain member with no team grant sees no apps (app ids are the public
+    // protocol URL segment), while the owner still sees "mobile".
+    let v: Value = mo
+        .get(format!("{}/api/v1/orgs/acme/apps", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["apps"].as_array().unwrap().len(), 0, "{v}");
+    let v: Value = ctx
+        .http
+        .get(format!("{}/api/v1/orgs/acme/apps", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["apps"].as_array().unwrap().len(), 1, "{v}");
+}

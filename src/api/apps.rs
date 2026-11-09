@@ -58,18 +58,22 @@ pub async fn list_apps(
     let org = db::orgs::find_org_by_slug(state.db(), &slug)
         .await?
         .ok_or(Error::NotFound)?;
+    // Not a member (or a token scoped elsewhere): no visibility → 404.
     db::orgs::org_role(state.db(), &org.id, &caller.user.id)
         .await?
-        .ok_or(Error::Forbidden)?;
-    // Respect token resource scope: an org-scoped token must match, an
-    // app-scoped token only sees its own app.
-    let apps = db::apps::list(state.db(), &org.id).await?;
-    let apps: Vec<_> = match &caller.scope {
-        TokenScope::All => apps,
-        TokenScope::Org(oid) if *oid == org.id => apps,
-        TokenScope::App(aid) => apps.into_iter().filter(|a| a.id == *aid).collect(),
-        _ => return Err(Error::Forbidden),
-    };
+        .ok_or(Error::NotFound)?;
+    if matches!(&caller.scope, TokenScope::Org(oid) if *oid != org.id) {
+        return Err(Error::NotFound);
+    }
+    // Only apps the caller can actually read (org role / team grants ∩ token
+    // scope ∩ cap). App ids are the public protocol URL segment, so listing
+    // an app the caller has no grant on would leak its manifests.
+    let mut apps = Vec::new();
+    for app in db::apps::list(state.db(), &org.id).await? {
+        if rbac::app_permission(state.db(), &caller, &app).await? >= Permission::Read {
+            apps.push(app);
+        }
+    }
     Ok(json_ok(json!({ "apps": apps })))
 }
 
