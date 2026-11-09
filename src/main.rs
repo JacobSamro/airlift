@@ -11,6 +11,7 @@ mod geo;
 mod keys;
 mod manifest_cache;
 mod models;
+mod observability;
 mod patches;
 mod protocol;
 mod rate_limit;
@@ -164,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
 
             tokio::spawn(gc::background(state.clone(), gc_interval));
             tokio::spawn(patches::worker_loop(state.clone()));
+            observability::spawn(state.clone());
 
             if analytics_enabled {
                 tokio::spawn(analytics::flush_loop(state.clone(), rollup_secs));

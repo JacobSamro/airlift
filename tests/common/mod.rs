@@ -219,3 +219,29 @@ pub fn parse_multipart(content_type: &str, body: &str) -> HashMap<String, (Strin
     }
     parts
 }
+
+/// Copy an export zip, adding extra files (e.g. a bundle's `.map`).
+#[allow(dead_code)]
+pub fn zip_with_extra(zip_bytes: Vec<u8>, extra: &[(String, Vec<u8>)]) -> Vec<u8> {
+    use std::io::{Read, Write};
+    let mut src = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+    let mut buf = Vec::new();
+    {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        for i in 0..src.len() {
+            let mut f = src.by_index(i).unwrap();
+            let name = f.name().to_string();
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes).unwrap();
+            zw.start_file(name, opts).unwrap();
+            zw.write_all(&bytes).unwrap();
+        }
+        for (name, bytes) in extra {
+            zw.start_file(name.as_str(), opts).unwrap();
+            zw.write_all(bytes).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+    buf
+}

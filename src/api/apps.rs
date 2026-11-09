@@ -20,7 +20,7 @@ use crate::state::AppState;
 use super::{json_ok, valid_slug};
 
 /// Resolve `{org}/{app}` and require `needed` permission for the caller.
-async fn resolve_app(
+pub(crate) async fn resolve_app(
     state: &AppState,
     caller: &ApiUser,
     org_slug: &str,

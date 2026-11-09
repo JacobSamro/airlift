@@ -19,6 +19,8 @@ export interface PublishOptions extends CommonOptions {
   platform: string;
   runtimeVersion?: string;
   rollout?: string;
+  /** commander sets false for --no-source-maps. */
+  sourceMaps?: boolean;
 }
 
 export async function publishCommand(opts: PublishOptions): Promise<void> {
@@ -68,7 +70,7 @@ export async function publishCommand(opts: PublishOptions): Promise<void> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "airlift-export-"));
   try {
     console.log(`Exporting bundle (npx expo export --output-dir ${tmpDir})...`);
-    runExpoExport(ctx.projectDir, tmpDir, platform);
+    runExpoExport(ctx.projectDir, tmpDir, platform, opts.sourceMaps !== false);
 
     console.log("Zipping export output...");
     const archive = await zipDirectory(tmpDir);

@@ -4,6 +4,7 @@ pub mod apps;
 pub mod audit;
 pub mod clients;
 pub mod domains;
+pub mod observability;
 pub mod orgs;
 pub mod patches;
 pub mod settings;

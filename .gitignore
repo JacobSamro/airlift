@@ -25,3 +25,5 @@ CLAUDE.md
 # publish CLI
 cli/node_modules
 cli/dist
+reporter/node_modules
+reporter/dist

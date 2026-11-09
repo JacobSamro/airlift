@@ -107,6 +107,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 time = { version = "=0.3.51", features = ["serde", "formatting", "parsing", "macros"] }
 url = "2"
 maxminddb = "0.24"
+sourcemap = "9"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }

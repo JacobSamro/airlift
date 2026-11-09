@@ -60,6 +60,7 @@ withCommonOptions(
       "override the runtime version (required if it cannot be derived from your Expo config)"
     )
     .option("--rollout <percent>", "auto-release channels start a progressive rollout at this share")
+    .option("--no-source-maps", "don't upload sourcemaps (used to symbolicate device error stacks)")
 ).action(async (opts) => {
   try {
     await publishCommand(opts);

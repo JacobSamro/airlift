@@ -85,6 +85,12 @@ impl Storage {
         format!("orgs/{org_id}/assets/sha256/{sha256}")
     }
 
+    /// Key for a launch bundle's sourcemap (private; never presigned for
+    /// devices — only the server reads it, to symbolicate stacks).
+    pub fn sourcemap_key(org_id: &str, bundle_sha256: &str) -> String {
+        format!("orgs/{org_id}/sourcemaps/{bundle_sha256}.map")
+    }
+
     /// Key for a bsdiff patch between two launch bundles.
     #[allow(dead_code)]
     pub fn patch_key(org_id: &str, from_sha256: &str, to_sha256: &str) -> String {

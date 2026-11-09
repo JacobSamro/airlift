@@ -4,7 +4,7 @@
 mod common;
 
 use base64::Engine;
-use common::{export_zip, parse_multipart, sha256_hex, spawn_s3_stub, Airlift};
+use common::{export_zip, parse_multipart, sha256_hex, spawn_s3_stub, zip_with_extra, Airlift};
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::sha2::Sha256 as RsaSha256;
 use rsa::signature::Verifier;
@@ -1869,4 +1869,192 @@ async fn device_geo_from_cdn_headers() {
     );
     assert_eq!(geo["countries"][1]["country"], "IN");
     assert_eq!(geo["cities"][0]["city"], "Berlin");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_errors_are_symbolicated_and_grouped() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    // A sourcemap mapping bundle line 1 col 0 → src/Checkout.tsx:42 (pay).
+    let map =
+        br#"{"version":3,"sources":["src/Checkout.tsx"],"names":["pay"],"mappings":"AAyCAA"}"#;
+    let zip = zip_with_extra(
+        export_zip(&["ios"], "err"),
+        &[("_expo/static/js/ios/entry-err.hbc.map".into(), map.to_vec())],
+    );
+    let (status, _) = publish(&ctx, "production", "1.0.0", zip).await;
+    assert_eq!(status, 201);
+    let resp = manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await;
+    let update_id = verified_part(&ctx, resp, "manifest").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let report = |device: &str, msg: &str| {
+        json!({
+            "name": "TypeError",
+            "message": msg,
+            "stack": "TypeError: boom\n    at pay (address at main.jsbundle:1:0)\n    at callFn (native)",
+            "fatal": true,
+            "update_id": update_id,
+            "platform": "ios",
+            "client_id": device,
+        })
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{}/u/{}/errors", ctx.base, ctx.app_id))
+        .json(&json!([
+            report("d1", "card 1234 declined"),
+            report("d2", "card 9876 declined")
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    // Both land in one group (same symbolicated top frame), culprit resolved.
+    let mut groups = Value::Null;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        groups = ctx
+            .http
+            .get(format!("{}/api/v1/orgs/acme/apps/mobile/errors", ctx.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if groups["groups"][0]["recent_events"] == 2 {
+            break;
+        }
+    }
+    let g = &groups["groups"][0];
+    assert_eq!(g["recent_events"], 2, "{groups}");
+    assert_eq!(g["recent_devices"], 2);
+    assert_eq!(g["culprit"], "pay (src/Checkout.tsx:42)");
+    assert_eq!(g["fatal"], true);
+
+    let detail: Value = ctx
+        .http
+        .get(format!(
+            "{}/api/v1/orgs/acme/apps/mobile/errors/{}",
+            ctx.base,
+            g["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let frame = &detail["events"][0]["frames"][0];
+    assert_eq!(frame["source"], "src/Checkout.tsx");
+    assert_eq!(frame["source_line"], 42);
+    assert_eq!(frame["symbolicated"], true);
+
+    // Unknown apps are refused; garbage is a 400.
+    let resp = reqwest::Client::new()
+        .post(format!("{}/u/nope/errors", ctx.base))
+        .json(&json!({ "message": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let resp = reqwest::Client::new()
+        .post(format!("{}/u/{}/errors", ctx.base, ctx.app_id))
+        .json(&json!({ "nope": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn otlp_logs_and_metrics() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+    let post = |path: &str, body: Value| {
+        reqwest::Client::new()
+            .post(format!("{}/u/{}/otlp/v1/{path}", ctx.base, ctx.app_id))
+            .json(&body)
+            .send()
+    };
+    let resp = post(
+        "logs",
+        json!({ "resourceLogs": [{
+            "resource": { "attributes": [{ "key": "os.type", "value": { "stringValue": "android" } }] },
+            "scopeLogs": [{ "logRecords": [
+                { "severityNumber": 9, "severityText": "INFO", "body": { "stringValue": "cart opened" } },
+                { "severityNumber": 17, "body": { "stringValue": "pay failed" },
+                  "attributes": [
+                    { "key": "exception.type", "value": { "stringValue": "NetworkError" } },
+                    { "key": "exception.message", "value": { "stringValue": "timeout" } }
+                  ] }
+            ]}]
+        }]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = post(
+        "metrics",
+        json!({ "resourceMetrics": [{ "scopeMetrics": [{ "metrics": [
+            { "name": "app.taps", "sum": { "aggregationTemporality": 1,
+                "dataPoints": [{ "asInt": "3" }, { "asInt": "4" }] } }
+        ]}]}]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    // Protobuf is refused with a clear error.
+    let resp = reqwest::Client::new()
+        .post(format!("{}/u/{}/otlp/v1/logs", ctx.base, ctx.app_id))
+        .header("content-type", "application/x-protobuf")
+        .body(vec![0u8; 4])
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error());
+
+    let api = |path: String| {
+        let http = ctx.http.clone();
+        let base = ctx.base.clone();
+        async move {
+            http.get(format!("{base}/api/v1/orgs/acme/apps/mobile/{path}"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let mut logs = Value::Null;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        logs = api("logs".into()).await;
+        if logs["logs"].as_array().is_some_and(|l| l.len() == 2) {
+            break;
+        }
+    }
+    assert_eq!(logs["logs"].as_array().unwrap().len(), 2, "{logs}");
+    let errors_only = api("logs?severity=17".into()).await;
+    assert_eq!(errors_only["logs"][0]["body"], "pay failed");
+    assert_eq!(errors_only["logs"][0]["platform"], "android");
+    let search = api("logs?q=cart".into()).await;
+    assert_eq!(search["logs"].as_array().unwrap().len(), 1);
+
+    // The exception record also became an error group.
+    let groups = api("errors".into()).await;
+    assert_eq!(groups["groups"][0]["name"], "NetworkError", "{groups}");
+
+    let names = api("metrics".into()).await;
+    assert_eq!(names["metrics"][0]["name"], "app.taps");
+    let series = api("metrics/series?name=app.taps&window=1h".into()).await;
+    assert_eq!(series["series"][0]["sum"], 7.0, "{series}");
+    assert_eq!(series["series"][0]["count"], 2);
 }

@@ -168,6 +168,23 @@ pub async fn publish(
         content_hasher.update(platform.as_bytes());
         content_hasher.update(launch.sha256.as_bytes());
 
+        // The bundle's sourcemap (`expo export --source-maps` writes
+        // `<bundle>.map`), stored privately per bundle hash for symbolicating
+        // device errors. Never served; not part of the content hash.
+        let map_path = format!("{}.map", pm.bundle);
+        if zip.by_name(&map_path).is_ok() {
+            let map = read_zip_file(&mut zip, &map_path, &mut budget)?;
+            let size = map.len() as i64;
+            state
+                .storage()
+                .put(
+                    &crate::storage::Storage::sourcemap_key(&app.org_id, &launch.sha256),
+                    map,
+                )
+                .await?;
+            db::observability::add_sourcemap(state.db(), &app.org_id, &launch.sha256, size).await?;
+        }
+
         let mut assets = Vec::with_capacity(pm.assets.len());
         for entry in &pm.assets {
             let bytes = read_zip_file(&mut zip, &entry.path, &mut budget)?;

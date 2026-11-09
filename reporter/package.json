@@ -1,0 +1,29 @@
+{
+  "name": "airlift-reporter",
+  "version": "0.1.0",
+  "description": "Report JS errors from an Expo app to a self-hosted airlift server (symbolicated with the update's sourcemap)",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "peerDependencies": {
+    "expo-updates": "*",
+    "react-native": "*"
+  },
+  "peerDependenciesMeta": {
+    "expo-updates": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

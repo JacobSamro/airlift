@@ -31,6 +31,13 @@ pub async fn run(state: &AppState) -> anyhow::Result<usize> {
         if let Err(e) = state.storage().delete(&key).await {
             tracing::warn!(error = %e, key, "gc: failed to delete object (row already removed)");
         }
+        // A collected launch bundle takes its sourcemap with it.
+        if db::observability::delete_sourcemap(state.db(), &org_id, &sha256).await? {
+            let map_key = Storage::sourcemap_key(&org_id, &sha256);
+            if let Err(e) = state.storage().delete(&map_key).await {
+                tracing::warn!(error = %e, key = map_key, "gc: failed to delete sourcemap");
+            }
+        }
         collected += 1;
     }
     if collected > 0 {

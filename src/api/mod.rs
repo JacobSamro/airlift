@@ -2,6 +2,7 @@
 //! PAT for the automation-facing endpoints).
 
 pub mod apps;
+mod observability;
 pub mod publish;
 
 use axum::{
@@ -66,6 +67,26 @@ pub fn routes() -> Router<AppState> {
             get(apps::app_clients),
         )
         .route("/api/v1/orgs/{slug}/apps/{app}/geo", get(apps::app_geo))
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/errors",
+            get(observability::list_errors),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/errors/{group}",
+            get(observability::get_error),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/logs",
+            get(observability::list_logs),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/metrics",
+            get(observability::list_metrics),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/apps/{app}/metrics/series",
+            get(observability::metric_series),
+        )
         .route(
             "/api/v1/orgs/{slug}/apps/{app}/channels",
             post(apps::create_channel),

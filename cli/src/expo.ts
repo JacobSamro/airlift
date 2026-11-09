@@ -86,9 +86,15 @@ export function resolveRuntimeVersion(
 export function runExpoExport(
   cwd: string,
   outputDir: string,
-  platform: "all" | "ios" | "android"
+  platform: "all" | "ios" | "android",
+  sourceMaps = true
 ): void {
   const args = ["expo", "export", "--output-dir", outputDir];
+  // Sourcemaps are uploaded with the update (stored privately on the server)
+  // so device error stacks can be symbolicated.
+  if (sourceMaps) {
+    args.push("--source-maps");
+  }
   if (platform !== "all") {
     args.push("--platform", platform);
   }

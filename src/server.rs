@@ -60,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .merge(crate::api::routes())
         .merge(crate::protocol::routes())
+        .merge(crate::observability::ingest::routes())
         .fallback(crate::web::handler)
         // Bounds uploaded `expo export` archives (axum's default is 2 MB).
         .layer(axum::extract::DefaultBodyLimit::max(
