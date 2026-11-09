@@ -991,3 +991,33 @@ async fn members_only_list_apps_they_can_read() {
         .unwrap();
     assert_eq!(v["apps"].as_array().unwrap().len(), 1, "{v}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_platform_publish_keeps_the_other_platform_live() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn(&stub).await;
+    let ctx = setup_instance(&server).await;
+
+    let (status, _) = publish(
+        &ctx,
+        "production",
+        "1.0.0",
+        export_zip(&["ios", "android"], "both"),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let resp = manifest_request(&ctx, "production", "1.0.0", "android", "1", None).await;
+    let android_before = verified_part(&ctx, resp, "manifest").await;
+
+    // An iOS-only hotfix must not take Android's release away.
+    let (status, body) =
+        publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "ios-fix")).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["carried_platforms"], json!(["android"]));
+    let resp = manifest_request(&ctx, "production", "1.0.0", "android", "1", None).await;
+    let android_after = verified_part(&ctx, resp, "manifest").await;
+    assert_eq!(
+        android_after["launchAsset"]["hash"],
+        android_before["launchAsset"]["hash"]
+    );
+}

@@ -203,7 +203,8 @@ pub async fn publish(
     // channel edits serialize instead of overwriting each other with a stale
     // view of the channels.
     let mut tx = state.db().begin_with("BEGIN IMMEDIATE").await?;
-    if let Some(head) = db::updates::head_group(&mut *tx, &branch.id, &runtime_version).await? {
+    let head = db::updates::head_group(&mut *tx, &branch.id, &runtime_version).await?;
+    if let Some(head) = &head {
         if head.content_hash == content_hash {
             return Err(Error::conflict(
                 "this exact update is already the head of the branch",
@@ -248,6 +249,19 @@ pub async fn publish(
         platforms.push(platform.clone());
     }
 
+    // Release pointers are per (channel, runtime), not per platform: a
+    // single-platform publish must not hide the other platform's live
+    // update. Carry the branch head's missing platforms into this group.
+    let mut carried = Vec::new();
+    if let Some(head) = head.filter(|h| h.group_type == "normal") {
+        for u in db::updates::updates_in_group(&mut *tx, &head.id).await? {
+            if !staged.contains_key(&u.platform) {
+                db::updates::copy_update_into_group(&mut tx, &u.id, &group.id).await?;
+                carried.push(u.platform);
+            }
+        }
+    }
+
     let released = advance_channels(&mut tx, &app, &branch, &group).await?;
     tx.commit().await?;
 
@@ -270,6 +284,7 @@ pub async fn publish(
             "branch": branch.name,
             "runtime_version": runtime_version,
             "platforms": platforms,
+            "carried_platforms": carried,
             "channels": released,
         })),
     )

@@ -475,7 +475,10 @@ pub async fn find_update_in_app(db: &Db, app_id: &str, update_id: &str) -> Resul
 }
 
 /// Per-platform updates of a group.
-pub async fn updates_in_group(db: &Db, group_id: &str) -> Result<Vec<Update>> {
+pub async fn updates_in_group<'e, E: sqlx::SqliteExecutor<'e>>(
+    db: E,
+    group_id: &str,
+) -> Result<Vec<Update>> {
     let u =
         sqlx::query_as::<_, Update>("SELECT * FROM updates WHERE group_id = ? ORDER BY platform")
             .bind(group_id)
@@ -618,27 +621,7 @@ pub async fn republish_group(db: &Db, group: &UpdateGroup) -> Result<UpdateGroup
         .fetch_all(&mut *tx)
         .await?;
     for (old_update_id,) in updates {
-        let new_update_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO updates (id, group_id, platform, launch_asset_id, metadata_json, created_at)
-             SELECT ?, ?, platform, launch_asset_id, metadata_json, ?
-             FROM updates WHERE id = ?",
-        )
-        .bind(&new_update_id)
-        .bind(&id)
-        .bind(&now)
-        .bind(&old_update_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO update_assets (update_id, asset_id, key, file_extension, content_type)
-             SELECT ?, asset_id, key, file_extension, content_type
-             FROM update_assets WHERE update_id = ?",
-        )
-        .bind(&new_update_id)
-        .bind(&old_update_id)
-        .execute(&mut *tx)
-        .await?;
+        copy_update_into_group(&mut tx, &old_update_id, &id).await?;
     }
     tx.commit().await?;
     Ok(UpdateGroup {
@@ -647,6 +630,37 @@ pub async fn republish_group(db: &Db, group: &UpdateGroup) -> Result<UpdateGroup
         created_at: now,
         ..group.clone()
     })
+}
+
+/// Copy one per-platform update (and its asset links) into another group under
+/// a fresh update id.
+pub async fn copy_update_into_group(
+    tx: &mut sqlx::SqliteConnection,
+    update_id: &str,
+    group_id: &str,
+) -> Result<()> {
+    let new_update_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO updates (id, group_id, platform, launch_asset_id, metadata_json, created_at)
+         SELECT ?, ?, platform, launch_asset_id, metadata_json, ?
+         FROM updates WHERE id = ?",
+    )
+    .bind(&new_update_id)
+    .bind(group_id)
+    .bind(now_rfc3339())
+    .bind(update_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO update_assets (update_id, asset_id, key, file_extension, content_type)
+         SELECT ?, asset_id, key, file_extension, content_type
+         FROM update_assets WHERE update_id = ?",
+    )
+    .bind(&new_update_id)
+    .bind(update_id)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
 }
 
 /// `group` if it is newer than what the channel currently serves for its
