@@ -132,7 +132,7 @@ async fn run_acme(
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "airlift listening (https)");
     loop {
-        let (tcp, _peer) = listener.accept().await?;
+        let (tcp, peer) = listener.accept().await?;
         let accept = acceptor.clone();
         let app = app.clone();
         let server_config = server_config.clone();
@@ -142,6 +142,13 @@ async fn run_acme(
                 Ok(Some(handshake)) => match handshake.into_stream(server_config).await {
                     Ok(tls_stream) => {
                         let io = TokioIo::new(tls_stream.compat());
+                        // Same as the plain-HTTP listener's connect-info service:
+                        // handlers (rate limiting, token IP allowlists, geo)
+                        // need the peer address, or every TLS client shares one.
+                        let app = tower::Layer::layer(
+                            &axum::Extension(axum::extract::ConnectInfo(peer)),
+                            app,
+                        );
                         let svc = TowerToHyperService::new(app);
                         if let Err(e) = Builder::new(TokioExecutor::new())
                             .serve_connection_with_upgrades(io, svc)
