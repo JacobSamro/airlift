@@ -115,20 +115,19 @@ async fn run_acme(
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let server_config = std::sync::Arc::new(server_config);
 
-    // Drive ACME order processing in the background.
-    let db_for_events = state.db().clone();
-    tokio::spawn(async move {
+    // Drive ACME order processing in the background. The guard aborts the
+    // driver when this future is dropped (domain-set reload, listener error):
+    // otherwise every reload leaks a state machine that keeps ordering and
+    // renewing certs for the OLD domain list against the same cache.
+    let _acme_driver = AbortOnDrop(tokio::spawn(async move {
         loop {
             match acme.next().await {
                 Some(Ok(ok)) => tracing::info!("acme: {:?}", ok),
-                Some(Err(err)) => {
-                    tracing::error!("acme error: {:?}", err);
-                    let _ = &db_for_events; // status updates wired via dashboard polling
-                }
+                Some(Err(err)) => tracing::error!("acme error: {:?}", err),
                 None => break,
             }
         }
-    });
+    }));
 
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "airlift listening (https)");
@@ -157,6 +156,15 @@ async fn run_acme(
                 Err(e) => tracing::debug!("tls accept error: {e}"),
             }
         });
+    }
+}
+
+/// Aborts the wrapped task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
