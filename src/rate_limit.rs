@@ -34,10 +34,13 @@ fn client_ip(req: &Request, trust_proxy: bool) -> String {
     if trust_proxy {
         let h = req.headers();
         if let Some(xff) = h.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            // Take the first non-empty hop; an empty/whitespace header must not
-            // collapse every client onto one degenerate rate-limit key.
-            if let Some(first) = xff.split(',').map(str::trim).find(|s| !s.is_empty()) {
-                return first.to_string();
+            // Take the LAST non-empty hop: proxies append the peer they saw,
+            // so the rightmost entry was written by our trusted proxy while
+            // everything left of it is client-controlled (a spoofed leftmost
+            // value would give every request a fresh rate-limit key). Empty
+            // entries are skipped so they can't collapse clients onto one key.
+            if let Some(last) = xff.rsplit(',').map(str::trim).find(|s| !s.is_empty()) {
+                return last.to_string();
             }
         }
         if let Some(rip) = h.get("x-real-ip").and_then(|v| v.to_str().ok()) {
@@ -72,4 +75,24 @@ pub async fn middleware(trust_proxy: bool, req: Request, next: Next) -> Response
         }
     }
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::extract::Request;
+
+    #[test]
+    fn forwarded_for_uses_the_proxy_appended_hop() {
+        let req = Request::builder()
+            .header("x-forwarded-for", "6.6.6.6, 203.0.113.9")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(super::client_ip(&req, true), "203.0.113.9");
+        let req = Request::builder()
+            .header("x-forwarded-for", "203.0.113.9, ")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(super::client_ip(&req, true), "203.0.113.9");
+    }
 }
