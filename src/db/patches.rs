@@ -2,8 +2,8 @@
 //!
 //! Status flow: `queued` → `generating` → `ready` | `failed` |
 //! `not_beneficial`. Failed jobs stay failed (a later request for the same
-//! pair won't re-enqueue while the row exists); interrupted `generating` rows
-//! are requeued on startup.
+//! pair won't re-enqueue while the row exists); `generating` rows whose
+//! lease (`claimed_at`) went stale are requeued by the worker.
 
 use serde::Serialize;
 
@@ -22,6 +22,8 @@ pub struct PatchRow {
     pub status: String,
     pub detail: Option<String>,
     pub created_at: String,
+    /// Lease timestamp of the worker currently generating this job.
+    pub claimed_at: Option<String>,
 }
 
 pub async fn find(db: &Db, from_update_id: &str, to_update_id: &str) -> Result<Option<PatchRow>> {
@@ -54,44 +56,58 @@ pub async fn enqueue(db: &Db, from_update_id: &str, to_update_id: &str) -> Resul
 /// Atomically claim the oldest queued job (worker concurrency = 1 per
 /// process; the single UPDATE keeps multi-process deployments safe too).
 pub async fn claim_next(db: &Db) -> Result<Option<PatchRow>> {
+    // The lease value doubles as the claim token: a random suffix keeps two
+    // claims in the same millisecond distinct.
+    let lease = format!("{}#{}", now_rfc3339(), uuid::Uuid::new_v4());
     let p = sqlx::query_as::<_, PatchRow>(
-        "UPDATE patches SET status = 'generating'
+        "UPDATE patches SET status = 'generating', claimed_at = ?
          WHERE id = (SELECT id FROM patches WHERE status = 'queued'
                      ORDER BY created_at LIMIT 1)
          RETURNING *",
     )
+    .bind(lease)
     .fetch_optional(db)
     .await?;
     Ok(p)
 }
 
-pub async fn mark_ready(db: &Db, id: &str, sha256: &str, size: i64) -> Result<()> {
-    sqlx::query("UPDATE patches SET status = 'ready', sha256 = ?, size = ? WHERE id = ?")
-        .bind(sha256)
-        .bind(size)
-        .bind(id)
-        .execute(db)
-        .await?;
+/// Terminal status write, applied only while `job` still holds its lease (a
+/// reclaimed job's late result must not overwrite the new owner's outcome).
+/// The three terminal states share this guard.
+async fn finish(
+    db: &Db,
+    job: &PatchRow,
+    status: &str,
+    sha256: Option<&str>,
+    size: Option<i64>,
+    detail: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE patches SET status = ?, sha256 = ?, size = ?, detail = ?
+         WHERE id = ? AND status = 'generating' AND claimed_at IS ?",
+    )
+    .bind(status)
+    .bind(sha256)
+    .bind(size)
+    .bind(detail)
+    .bind(&job.id)
+    .bind(&job.claimed_at)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
-pub async fn mark_failed(db: &Db, id: &str, detail: &str) -> Result<()> {
-    sqlx::query("UPDATE patches SET status = 'failed', detail = ? WHERE id = ?")
-        .bind(detail)
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(())
+pub async fn mark_ready(db: &Db, job: &PatchRow, sha256: &str, size: i64) -> Result<()> {
+    finish(db, job, "ready", Some(sha256), Some(size), None).await
+}
+
+pub async fn mark_failed(db: &Db, job: &PatchRow, detail: &str) -> Result<()> {
+    finish(db, job, "failed", None, None, Some(detail)).await
 }
 
 /// Terminal: the diff was too close to the full bundle to be worth serving.
-pub async fn mark_not_beneficial(db: &Db, id: &str, size: i64) -> Result<()> {
-    sqlx::query("UPDATE patches SET status = 'not_beneficial', size = ? WHERE id = ?")
-        .bind(size)
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(())
+pub async fn mark_not_beneficial(db: &Db, job: &PatchRow, size: i64) -> Result<()> {
+    finish(db, job, "not_beneficial", None, Some(size), None).await
 }
 
 /// Put a ready-but-lost patch back in the queue.
@@ -103,10 +119,17 @@ pub async fn requeue(db: &Db, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Requeue jobs a previous process left mid-generation.
-pub async fn requeue_interrupted(db: &Db) -> Result<()> {
-    sqlx::query("UPDATE patches SET status = 'queued' WHERE status = 'generating'")
-        .execute(db)
-        .await?;
-    Ok(())
+/// Requeue `generating` jobs whose lease is older than `cutoff` (the worker
+/// died or restarted mid-job). Live leases held by another process are left
+/// alone. Leases are `<rfc3339>#<uuid>`, so text comparison against a bare
+/// fixed-width timestamp orders by the time prefix.
+pub async fn requeue_stale(db: &Db, cutoff: &str) -> Result<u64> {
+    let res = sqlx::query(
+        "UPDATE patches SET status = 'queued', claimed_at = NULL
+         WHERE status = 'generating' AND (claimed_at IS NULL OR claimed_at < ?)",
+    )
+    .bind(cutoff)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected())
 }

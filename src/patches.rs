@@ -130,6 +130,10 @@ async fn update_with_launch(
 
 // ───────────────────────── background worker ─────────────────────────
 
+/// A `generating` lease older than this is presumed dead and requeued. Far
+/// above any real bsdiff run on a JS bundle.
+const STALE_LEASE_SECS: i64 = 30 * 60;
+
 /// Poll for queued patch jobs and generate them, one at a time (bsdiff is
 /// CPU- and memory-hungry; concurrency 1 keeps a small box healthy).
 pub async fn worker_loop(state: AppState) {
@@ -137,14 +141,19 @@ pub async fn worker_loop(state: AppState) {
     if !cfg.enabled {
         return;
     }
-    // Reclaim jobs orphaned by a restart.
-    if let Err(e) = db::patches::requeue_interrupted(state.db()).await {
-        tracing::warn!(error = %e, "patch requeue on startup failed");
-    }
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(cfg.poll_secs.max(1)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
+        // Reclaim jobs whose worker died mid-generation. Only leases older
+        // than STALE_LEASE_SECS: a job another live process is generating
+        // right now must not be handed out twice.
+        let cutoff = crate::util::rfc3339_in(-STALE_LEASE_SECS);
+        match db::patches::requeue_stale(state.db(), &cutoff).await {
+            Ok(n) if n > 0 => tracing::info!(requeued = n, "requeued stale patch jobs"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "patch requeue failed"),
+        }
         loop {
             match generate_next(&state).await {
                 Ok(true) => continue, // drained one job; try for more
@@ -167,7 +176,7 @@ async fn generate_next(state: &AppState) -> Result<bool> {
         Ok(()) => {}
         Err(e) => {
             tracing::warn!(error = %e, patch = %job.id, "patch generation failed");
-            db::patches::mark_failed(state.db(), &job.id, &e.to_string()).await?;
+            db::patches::mark_failed(state.db(), &job, &e.to_string()).await?;
         }
     }
     Ok(true)
@@ -207,7 +216,7 @@ async fn generate_one(state: &AppState, job: &db::patches::PatchRow) -> Result<(
 
     let max_ratio = state.config().patches.max_size_ratio;
     if (patch.len() as f64) >= (to_len as f64) * max_ratio {
-        db::patches::mark_not_beneficial(db, &job.id, patch.len() as i64).await?;
+        db::patches::mark_not_beneficial(db, job, patch.len() as i64).await?;
         tracing::info!(patch = %job.id, size = patch.len(), full = to_len,
             "patch not beneficial; devices keep full downloads");
         return Ok(());
@@ -217,7 +226,7 @@ async fn generate_one(state: &AppState, job: &db::patches::PatchRow) -> Result<(
     let size = patch.len() as i64;
     let key = Storage::patch_key(&org_id, &from_launch.sha256, &to_launch.sha256);
     storage.put(&key, patch).await?;
-    db::patches::mark_ready(db, &job.id, &sha, size).await?;
+    db::patches::mark_ready(db, job, &sha, size).await?;
     tracing::info!(patch = %job.id, size, full = to_len, "patch ready");
     Ok(())
 }
