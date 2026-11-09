@@ -185,7 +185,11 @@ async fn manifest(
         "runtimeVersion": group.runtime_version,
         "launchAsset": {
             "hash": hex_to_b64url(&launch.sha256),
-            "key": "bundle",
+            // expo-updates uses the key as the asset's unique id and skips the
+            // download when it already holds that key, so it must change with
+            // the content (the reference server uses the bundle's md5).
+            "key": format!("bundle-{}", launch.sha256),
+            "fileExtension": ".bundle",
             "contentType": launch.content_type,
             "url": asset_url(&launch.sha256),
         },

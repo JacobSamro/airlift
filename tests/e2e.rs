@@ -477,6 +477,9 @@ async fn bsdiff_patch_lifecycle() {
     let v2_id = m2["id"].as_str().unwrap().to_string();
     let v2_url = m2["launchAsset"]["url"].as_str().unwrap().to_string();
     let v2_hash = m2["launchAsset"]["hash"].as_str().unwrap().to_string();
+    // The launch asset key is the client's asset identity: a new bundle must
+    // get a new key or the device reuses the old file.
+    assert_ne!(m1["launchAsset"]["key"], m2["launchAsset"]["key"]);
 
     let patch_request = || {
         ctx.http
