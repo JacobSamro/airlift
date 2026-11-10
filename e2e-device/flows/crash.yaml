@@ -1,8 +1,14 @@
 # Tap "Check for update" when the server offers an update that throws while
-# its JS loads. The app fetches it, reloads, dies before rendering, and
-# expo-updates' error recovery relaunches the previous update (back to
-# "status:idle"). run.sh checks the server saw the fetch (a dropped tap
-# looks the same on screen) and asserts the rest in later steps.
+# its JS loads, then cold-start the app like a user would.
+#
+# The in-app reload into the broken bundle just leaves a blank screen:
+# expo-updates' error recovery only guards a cold launch (it stops watching
+# ~10 s after the first render). On the next cold start the broken update
+# crashes, recovery marks it failed and relaunches the previous one; the
+# launcher never picks a failed update again, so a second cold start is on
+# the previous update for sure. run.sh checks the server saw the fetch (a
+# dropped tap looks the same) and asserts the blocking in later steps.
+# env: MARKER (the update the device must end up on)
 appId: dev.airlift.e2e
 ---
 - launchApp:
@@ -13,11 +19,29 @@ appId: dev.airlift.e2e
       text: "status:(idle|up-to-date.*)"
     timeout: 60000
 - runFlow: tap-check.yaml
-# Let the fetch → crash → relaunch play out. If recovery ends in a crash
-# instead of a relaunch, the next step's launchApp starts the app again.
+# Fetch → reload into the broken bundle (the UI goes away).
+- extendedWaitUntil:
+    notVisible:
+      id: check
+    timeout: 30000
+    optional: true
+# Cold start: v-broken crashes, recovery relaunches the previous update.
+- launchApp:
+    stopApp: true
 - extendedWaitUntil:
     visible:
-      id: status
-      text: "status:idle"
+      id: marker
+      text: "marker:${MARKER}"
     timeout: 60000
     optional: true
+# Second cold start: the failed update is no longer launchable.
+- launchApp:
+    stopApp: true
+- extendedWaitUntil:
+    visible:
+      id: marker
+      text: "marker:${MARKER}"
+    timeout: 60000
+- assertVisible:
+    id: origin
+    text: "origin:update"

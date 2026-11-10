@@ -300,15 +300,15 @@ check_symbolicated() { # marker update-id
     'any(.frames[]?; .symbolicated and ((.source // "") | endswith("App.js")) and .source_line == $l)' \
     <<<"$event" >/dev/null || die "no frame symbolicated to App.js:$want (raw stack: $(jq -r .raw_stack <<<"$event"))"
 }
-# Tap "check" on an update that throws while its JS loads. The device
-# downloads it, crashes, and expo-updates relaunches the previous update.
-# A dropped tap looks the same on screen (idle, old marker), so ask the
-# server whether the device actually fetched the manifest, and re-tap if not.
-crash_update() { # marker
+# Tap "check" on an update that throws while its JS loads, then cold-start
+# (see flows/crash.yaml): the device must end up back on `previous`. A
+# dropped tap looks the same on screen, so ask the server whether the device
+# actually fetched the manifest, and re-tap if not.
+crash_update() { # crash-marker previous-marker
   local before
   for attempt in 1 2 3; do
     before="$(metric airlift_manifest_requests_total 'result="manifest"')"
-    flow crash.yaml
+    flow crash.yaml "MARKER=$2"
     if [ "${E2E_DRY_RUN:-}" = 1 ] \
       || [ "$(metric airlift_manifest_requests_total 'result="manifest"')" -gt "$before" ]; then
       return 0
@@ -409,7 +409,7 @@ fi
 # ── crash protection: an update that dies on launch is rolled back by the
 #    client and never offered to that device again ──
 publish v11 "$CHANNEL" crash
-crash_update v11
+crash_update v11 v10
 flow up-to-date.yaml MARKER=v10 REASON=noUpdateAvailableOnServer
 if [ "${E2E_DRY_RUN:-}" != 1 ]; then
   [ "$(metric airlift_manifest_requests_total 'result="blocked"')" -gt 0 ] \
