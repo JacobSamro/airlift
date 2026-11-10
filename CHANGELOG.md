@@ -75,10 +75,10 @@ First release.
 
 ### Packages
 
-- `airlift-cli`: `init` (with `--keyid` for a rotated key), `publish`
+- `airlift-cli` 0.1.1 (0.1.0 was an early preview): `init` (with `--keyid` for a rotated key), `publish`
   (uploads sourcemaps by default), `promote`, `rollback`, `republish`,
   `rollout`, `split`, `list`, `doctor`, `generate-certs`.
-- `airlift-reporter`: reports uncaught errors, unhandled rejections and
+- `airlift-reporter` 0.1.0: reports uncaught errors, unhandled rejections and
   handled errors from React Native with the running update's id, for
   server-side symbolication.
 

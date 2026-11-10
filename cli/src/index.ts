@@ -13,7 +13,7 @@ const program = new Command();
 program
   .name("airlift")
   .description("Publish Expo OTA updates to a self-hosted airlift server")
-  .version("0.1.0");
+  .version("0.1.1");
 
 function fail(err: unknown): never {
   const message = err instanceof Error ? err.message : String(err);

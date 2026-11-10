@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "description": "Report JS errors from an Expo app to a self-hosted airlift server (symbolicated with the update's sourcemap)",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JacobSamro/airlift.git",
+    "directory": "reporter"
+  },
+  "homepage": "https://github.com/JacobSamro/airlift#readme",
+  "keywords": ["expo", "expo-updates", "ota", "self-hosted"],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
