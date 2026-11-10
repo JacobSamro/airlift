@@ -31,9 +31,11 @@ on:
       - ".github/workflows/device-e2e.yml"
   workflow_dispatch:
 
+# A newer PR push supersedes the old run; on main/master every push keeps
+# its own result (runs queue instead of cancelling each other).
 concurrency:
   group: device-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -69,9 +71,9 @@ jobs:
       - name: Build airlift + S3 stub
         run: cargo build --release --locked --bin airlift --example s3_stub
 
-      - name: Install Maestro
+      - name: Install Maestro (pinned)
         run: |
-          curl -fsSL "https://get.maestro.mobile.dev" | bash
+          ./e2e-device/install-maestro.sh
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
 
       - name: Enable KVM
@@ -130,9 +132,9 @@ jobs:
       - name: Build airlift + S3 stub
         run: cargo build --release --locked --bin airlift --example s3_stub
 
-      - name: Install Maestro
+      - name: Install Maestro (pinned)
         run: |
-          curl -fsSL "https://get.maestro.mobile.dev" | bash
+          ./e2e-device/install-maestro.sh
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
 
       - name: Boot iOS simulator
