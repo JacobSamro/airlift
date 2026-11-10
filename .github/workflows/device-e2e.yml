@@ -137,6 +137,24 @@ jobs:
           ./e2e-device/install-maestro.sh
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
 
+      # Native build caches: CocoaPods downloads (Hermes, RN deps) and ccache
+      # for the Xcode compile (app.json turns on ios.ccacheEnabled; a build
+      # without ccache on PATH just compiles normally).
+      - name: Install ccache
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ccache
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+      - name: Cache CocoaPods + ccache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.ccache
+          key: device-e2e-ios-${{ runner.os }}-${{ hashFiles('e2e-device/app/bun.lock', 'e2e-device/app/app.json') }}-${{ github.sha }}
+          restore-keys: |
+            device-e2e-ios-${{ runner.os }}-${{ hashFiles('e2e-device/app/bun.lock', 'e2e-device/app/app.json') }}-
+            device-e2e-ios-${{ runner.os }}-
+
       - name: Boot iOS simulator
         id: sim
         uses: futureware-tech/simulator-action@v6

@@ -180,9 +180,17 @@ flow() { # flow-file KEY=VAL...
   log "[$STEP] maestro $file $*"
   if [ "${E2E_DRY_RUN:-}" = 1 ]; then return 0; fi
   local out="$WORK/maestro/$STEP-${file%.yaml}.out"
-  if run_maestro "$out" "$file" ${env_args[@]+"${env_args[@]}"}; then return 0; fi
+  # Reinstalling the driver costs ~1 min per step on iOS; once one step
+  # passed, the installed driver is known good, so keep it.
+  local reinstall=()
+  if [ -n "$DRIVER_OK" ]; then reinstall=(--no-reinstall-driver); fi
+  if run_maestro "$out" "$file" ${reinstall[@]+"${reinstall[@]}"} ${env_args[@]+"${env_args[@]}"}; then
+    DRIVER_OK=1
+    return 0
+  fi
   # Maestro's iOS XCTest driver sometimes misses its startup window on a
-  # loaded runner; that fails before any flow command ran, so retry once.
+  # loaded runner; that fails before any flow command ran, so retry once
+  # with a fresh driver install.
   if grep -q "driver not ready in time" "$out"; then
     log "[$STEP] Maestro driver startup timed out; retrying once"
     if run_maestro "$out.retry" "$file" ${env_args[@]+"${env_args[@]}"}; then return 0; fi
@@ -190,6 +198,7 @@ flow() { # flow-file KEY=VAL...
   device_diagnostics
   die "step $STEP ($file $*) failed"
 }
+DRIVER_OK=""
 run_maestro() { # out-file flow-file maestro-args...
   local out="$1" file="$2"; shift 2
   maestro ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} test --debug-output "$WORK/maestro/$STEP-${file%.yaml}" \

@@ -21,7 +21,13 @@
       "enableBsdiffPatchSupport": true
     },
     "plugins": [
-      ["expo-build-properties", { "android": { "usesCleartextTraffic": true } }]
+      [
+        "expo-build-properties",
+        {
+          "android": { "usesCleartextTraffic": true },
+          "ios": { "ccacheEnabled": true }
+        }
+      ]
     ]
   }
 }
