@@ -8,6 +8,8 @@ export interface InitOptions {
   org: string;
   app: string;
   token?: string;
+  /** Signing key the build verifies with (default "main"; see signing-keys). */
+  keyid?: string;
 }
 
 interface ExpoUpdatesConfig {
@@ -18,12 +20,12 @@ interface ExpoUpdatesConfig {
   requestHeaders: Record<string, string>;
 }
 
-function desiredUpdates(updateUrl: string): ExpoUpdatesConfig {
+function desiredUpdates(updateUrl: string, keyid: string): ExpoUpdatesConfig {
   return {
     url: updateUrl,
     enabled: true,
     codeSigningCertificate: "./certs/certificate.pem",
-    codeSigningMetadata: { keyid: "main", alg: "rsa-v1_5-sha256" },
+    codeSigningMetadata: { keyid, alg: "rsa-v1_5-sha256" },
     requestHeaders: { "expo-channel-name": "production" },
   };
 }
@@ -36,6 +38,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
     );
   }
   const server = normalizeServer(opts.server);
+  const keyid = opts.keyid ?? "main";
   const client = { server, token };
 
   // Verify the app exists and grab its id.
@@ -60,7 +63,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
   // Certificate
   const pem = await getText(
     client,
-    `/api/v1/orgs/${encodeURIComponent(opts.org)}/apps/${encodeURIComponent(opts.app)}/certificate`
+    `/api/v1/orgs/${encodeURIComponent(opts.org)}/apps/${encodeURIComponent(opts.app)}/certificate?keyid=${encodeURIComponent(keyid)}`
   );
   const certDir = path.join(projectDir, "certs");
   fs.mkdirSync(certDir, { recursive: true });
@@ -72,7 +75,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
   const updateUrl = `${server}/u/${appId}/manifest`;
   const appJsonPath = path.join(projectDir, "app.json");
   if (fs.existsSync(appJsonPath)) {
-    patchAppJson(appJsonPath, updateUrl);
+    patchAppJson(appJsonPath, updateUrl, keyid);
     console.log("Updated app.json (expo.updates and expo.runtimeVersion).");
   } else {
     const dynamicConfig = ["app.config.js", "app.config.ts", "app.config.mjs", "app.config.cjs"]
@@ -86,7 +89,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
       console.log(
         JSON.stringify(
           {
-            updates: desiredUpdates(updateUrl),
+            updates: desiredUpdates(updateUrl, keyid),
             runtimeVersion: { policy: "appVersion" },
           },
           null,
@@ -100,7 +103,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
       console.log(
         JSON.stringify(
           {
-            updates: desiredUpdates(updateUrl),
+            updates: desiredUpdates(updateUrl, keyid),
             runtimeVersion: { policy: "appVersion" },
           },
           null,
@@ -116,7 +119,7 @@ export async function initCommand(opts: InitOptions): Promise<void> {
   console.log("of your app before OTA updates from this server will be picked up.");
 }
 
-function patchAppJson(appJsonPath: string, updateUrl: string): void {
+function patchAppJson(appJsonPath: string, updateUrl: string, keyid: string): void {
   let root: Record<string, unknown>;
   try {
     root = JSON.parse(fs.readFileSync(appJsonPath, "utf8")) as Record<string, unknown>;
@@ -134,7 +137,7 @@ function patchAppJson(appJsonPath: string, updateUrl: string): void {
     typeof expo.updates === "object" && expo.updates !== null
       ? (expo.updates as Record<string, unknown>)
       : {};
-  const desired = desiredUpdates(updateUrl);
+  const desired = desiredUpdates(updateUrl, keyid);
   const existingHeaders =
     typeof existingUpdates.requestHeaders === "object" && existingUpdates.requestHeaders !== null
       ? (existingUpdates.requestHeaders as Record<string, unknown>)

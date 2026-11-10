@@ -39,6 +39,11 @@ program
   .requiredOption("--org <slug>", "organization slug")
   .requiredOption("--app <slug>", "app slug")
   .option("--token <pat>", "personal access token (falls back to AIRLIFT_TOKEN)")
+  .option(
+    "--keyid <id>",
+    "code-signing key this build verifies with (a rotated key from the app's signing keys)",
+    "main"
+  )
   .action(async (opts) => {
     try {
       await initCommand(opts);
