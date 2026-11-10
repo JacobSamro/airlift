@@ -29,6 +29,19 @@ appId: dev.airlift.e2e
     visible:
       id: marker
       text: "marker:${MARKER}"
+    timeout: 60000
+    optional: true
+# A check still "checking" after a minute is hung (see unstick-check.yaml).
+- runFlow:
+    when:
+      visible:
+        id: status
+        text: "status:checking"
+    file: unstick-check.yaml
+- extendedWaitUntil:
+    visible:
+      id: marker
+      text: "marker:${MARKER}"
     timeout: 120000
 - assertVisible:
     id: origin

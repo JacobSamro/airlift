@@ -1,0 +1,23 @@
+# On the iOS simulator, expo-updates' first code-signature check can hang
+# inside the trust evaluation (SecTrustEvaluate → trustd): the server has
+# answered, the device makes no further request, and status stays
+# "checking" for good (run 42734678137, step 2). Cold-restart the app,
+# which abandons the hung check, and check again.
+appId: dev.airlift.e2e
+---
+- launchApp:
+    stopApp: true
+- extendedWaitUntil:
+    visible:
+      id: status
+      text: "status:idle"
+    timeout: 60000
+- runFlow: tap-check.yaml
+- repeat:
+    times: 3
+    while:
+      visible:
+        id: status
+        text: "status:idle"
+    commands:
+      - runFlow: tap-check.yaml

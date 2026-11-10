@@ -27,6 +27,19 @@ appId: dev.airlift.e2e
     visible:
       id: status
       text: "status:up-to-date:${REASON}"
+    timeout: 45000
+    optional: true
+# A check still "checking" by now is hung (see unstick-check.yaml).
+- runFlow:
+    when:
+      visible:
+        id: status
+        text: "status:checking"
+    file: unstick-check.yaml
+- extendedWaitUntil:
+    visible:
+      id: status
+      text: "status:up-to-date:${REASON}"
     timeout: 60000
 - assertVisible:
     id: marker
