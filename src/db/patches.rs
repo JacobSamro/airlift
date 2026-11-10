@@ -123,8 +123,27 @@ async fn finish(
     Ok(())
 }
 
-pub async fn mark_ready(db: &Db, job: &PatchRow, sha256: &str, size: i64) -> Result<()> {
-    finish(db, job, "ready", Some(sha256), Some(size), None).await
+/// Ready, recording the storage key written (the GC deletes the object once
+/// no patch row points at it any more; see `patch_object_tombstones`).
+pub async fn mark_ready(
+    db: &Db,
+    job: &PatchRow,
+    sha256: &str,
+    size: i64,
+    object_key: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE patches SET status = 'ready', sha256 = ?, size = ?, detail = NULL, object_key = ?
+         WHERE id = ? AND status = 'generating' AND claimed_at IS ?",
+    )
+    .bind(sha256)
+    .bind(size)
+    .bind(object_key)
+    .bind(&job.id)
+    .bind(&job.claimed_at)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 pub async fn mark_failed(db: &Db, job: &PatchRow, detail: &str) -> Result<()> {
@@ -158,4 +177,31 @@ pub async fn requeue_stale(db: &Db, cutoff: &str) -> Result<u64> {
     .execute(db)
     .await?;
     Ok(res.rows_affected())
+}
+
+/// Patch-object tombstones older than `cutoff` (the GC grace window).
+pub async fn tombstones_before(db: &Db, cutoff: &str) -> Result<Vec<String>> {
+    let keys = sqlx::query_scalar::<_, String>(
+        "SELECT object_key FROM patch_object_tombstones WHERE created_at < ? ORDER BY created_at",
+    )
+    .bind(cutoff)
+    .fetch_all(db)
+    .await?;
+    Ok(keys)
+}
+
+/// Settle one tombstone: drop it and report whether the object is now
+/// unreferenced (true ⇒ the caller deletes it). A key still used by another
+/// patch row is kept; that row's own deletion leaves a new tombstone.
+pub async fn settle_tombstone(db: &Db, object_key: &str) -> Result<bool> {
+    let referenced: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM patches WHERE object_key = ?)")
+            .bind(object_key)
+            .fetch_one(db)
+            .await?;
+    sqlx::query("DELETE FROM patch_object_tombstones WHERE object_key = ?")
+        .bind(object_key)
+        .execute(db)
+        .await?;
+    Ok(!referenced)
 }

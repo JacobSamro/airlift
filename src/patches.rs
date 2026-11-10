@@ -245,7 +245,7 @@ async fn generate_one(state: &AppState, job: &db::patches::PatchRow) -> Result<(
     let size = patch.len() as i64;
     let key = Storage::patch_key(&org_id, &from_launch.sha256, &to_launch.sha256);
     storage.put(&key, patch).await?;
-    db::patches::mark_ready(db, job, &sha, size).await?;
+    db::patches::mark_ready(db, job, &sha, size, &key).await?;
     tracing::info!(patch = %job.id, size, full = to_len, "patch ready");
     Ok(())
 }

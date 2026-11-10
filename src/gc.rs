@@ -40,8 +40,29 @@ pub async fn run(state: &AppState) -> anyhow::Result<usize> {
         }
         collected += 1;
     }
+    collected += sweep_patch_objects(state, &cutoff).await?;
     if collected > 0 {
         tracing::info!(collected, "gc sweep complete");
+    }
+    Ok(collected)
+}
+
+/// Delete bsdiff patch objects whose patch rows are gone (updates deleted,
+/// cascading). A DB trigger leaves a tombstone per deleted row's key; past
+/// the grace window, the object goes unless another row still uses it.
+async fn sweep_patch_objects(state: &AppState, cutoff: &str) -> anyhow::Result<usize> {
+    let mut collected = 0;
+    for key in db::patches::tombstones_before(state.db(), cutoff).await? {
+        if !db::patches::settle_tombstone(state.db(), &key).await? {
+            tracing::debug!(key, "gc: patch object still referenced; kept");
+            continue;
+        }
+        tracing::debug!(key, "gc: collecting patch object");
+        // A failed delete leaks bytes; a regenerated patch overwrites the key.
+        if let Err(e) = state.storage().delete(&key).await {
+            tracing::warn!(error = %e, key, "gc: failed to delete patch object");
+        }
+        collected += 1;
     }
     Ok(collected)
 }

@@ -92,7 +92,6 @@ impl Storage {
     }
 
     /// Key for a bsdiff patch between two launch bundles.
-    #[allow(dead_code)]
     pub fn patch_key(org_id: &str, from_sha256: &str, to_sha256: &str) -> String {
         format!("orgs/{org_id}/patches/{from_sha256}-{to_sha256}")
     }

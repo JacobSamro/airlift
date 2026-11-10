@@ -692,6 +692,106 @@ async fn bsdiff_patch_lifecycle() {
     assert_eq!(resp.status(), 307);
 }
 
+/// Patch objects outlive nothing: once their updates are gone (here: the
+/// whole app is deleted, cascading to patch rows), the GC deletes them.
+#[tokio::test(flavor = "multi_thread")]
+async fn gc_collects_patch_objects_of_deleted_updates() {
+    let stub = spawn_s3_stub().await;
+    let server = Airlift::spawn_with(&stub, &[("AIRLIFT_GC__INTERVAL_SECS", "1")]).await;
+    let ctx = setup_instance(&server).await;
+
+    let launch = |m: &Value| {
+        let hash = m["launchAsset"]["hash"].as_str().unwrap().to_string();
+        hex::encode(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(hash)
+                .unwrap(),
+        )
+    };
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "g1")).await;
+    assert_eq!(status, 201);
+    let m1 = verified_part(
+        &ctx,
+        manifest_request(&ctx, "production", "1.0.0", "ios", "1", None).await,
+        "manifest",
+    )
+    .await;
+    let v1_id = m1["id"].as_str().unwrap().to_string();
+    let (status, _) = publish(&ctx, "production", "1.0.0", export_zip(&["ios"], "g2")).await;
+    assert_eq!(status, 201);
+    let m2 = verified_part(
+        &ctx,
+        manifest_request(&ctx, "production", "1.0.0", "ios", "1", Some(&v1_id)).await,
+        "manifest",
+    )
+    .await;
+    let v2_id = m2["id"].as_str().unwrap().to_string();
+    let v2_url = m2["launchAsset"]["url"].as_str().unwrap().to_string();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let resp = ctx
+            .http
+            .get(&v2_url)
+            .header("A-IM", "bsdiff")
+            .header("Expo-Current-Update-ID", &v1_id)
+            .header("Expo-Requested-Update-ID", &v2_id)
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == 226 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "patch never became ready"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    let app: Value = ctx
+        .http
+        .get(format!("{}/api/v1/orgs/acme/apps/mobile", ctx.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let org_id = app["app"]["org_id"].as_str().unwrap();
+    let object = format!(
+        "http://{stub}/test/orgs/{org_id}/patches/{}-{}",
+        launch(&m1),
+        launch(&m2)
+    );
+    assert_eq!(reqwest::get(&object).await.unwrap().status(), 200);
+
+    // A live patch survives sweeps.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(
+        reqwest::get(&object).await.unwrap().status(),
+        200,
+        "GC deleted a patch that is still in use"
+    );
+
+    let resp = ctx
+        .http
+        .delete(format!("{}/api/v1/orgs/acme/apps/mobile", ctx.base))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "delete app: {}", resp.status());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while reqwest::get(&object).await.unwrap().status() != 404 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "patch object of a deleted app was never collected"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn client_monitoring_and_metrics() {
     let stub = spawn_s3_stub().await;
