@@ -1,6 +1,7 @@
 # Tap "Check for update" and assert the server reported nothing new, and
 # the app stayed on the expected bundle.
-# env: MARKER
+# env: MARKER, REASON (the check's reason regex; run.sh defaults it to .*,
+#      noUpdateAvailableOnServer = the server said no, not the client)
 appId: dev.airlift.e2e
 ---
 - launchApp:
@@ -25,7 +26,7 @@ appId: dev.airlift.e2e
 - extendedWaitUntil:
     visible:
       id: status
-      text: "status:up-to-date.*"
+      text: "status:up-to-date:${REASON}"
     timeout: 60000
 - assertVisible:
     id: marker

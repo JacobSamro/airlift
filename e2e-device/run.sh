@@ -5,13 +5,16 @@
 #   e2e-device/run.sh android   # needs a running emulator/device (adb)
 #   e2e-device/run.sh ios       # needs a booted simulator (SIM_UDID or "booted")
 #
-# What it covers, all on the device:
+# What it covers, all on the device (built against a rotated signing key,
+# so every update must be signed with the keyid the build asks for):
 #   embedded launch → publish v2 → fetch+reload → up-to-date → cold start
 #   keeps v2 → publish v3 → channel rollback (back to v2) →
 #   rollback-to-embedded → cold start stays embedded → publish v4 recovers →
 #   update-only image asset → bsdiff patch applied (no full fallback) →
 #   gated channel + promote → staged rollout 0.001% → 100% → channel
-#   repoint to another branch and back.
+#   repoint to another branch and back → airlift-reporter error symbolicated
+#   to the App.js line → crash-on-launch update rolled back by the client
+#   and refused by the server from then on.
 #
 # Needs: cargo, bun, node (npx), maestro, plus Xcode or the Android SDK.
 # Env overrides: AIRLIFT_BIN, S3_STUB_BIN, SKIP_CARGO_BUILD=1, SIM_UDID,
@@ -82,8 +85,10 @@ if [ "${SKIP_CARGO_BUILD:-}" != "1" ]; then
   log "cargo build (airlift + s3 stub)"
   (cd "$ROOT" && cargo build --release --locked --bin airlift --example s3_stub)
 fi
-log "build publish CLI"
+log "build publish CLI + airlift-reporter"
 (cd "$ROOT/cli" && bun install --frozen-lockfile >/dev/null && bun run build >/dev/null)
+# The app depends on file:../../reporter, so its dist must exist first.
+(cd "$ROOT/reporter" && bun install --frozen-lockfile >/dev/null && bun run build >/dev/null)
 
 # ───────────── start S3 stub + airlift ─────────────
 log "start s3 stub on :$S3_PORT and airlift on :$PORT"
@@ -131,8 +136,17 @@ AIRLIFT_TOKEN="$(api POST /api/v1/tokens '{"name":"device-e2e","org":"'$ORG'","p
 
 cli() { (cd "$APP" && node "$CLI" "$@"); }
 
-log "airlift init (cert + expo.updates config)"
-cli init --server "$SERVER" --org "$ORG" --app "$APP_SLUG"
+# Key rotation: the build embeds a second key's certificate, so every OTA
+# step below only passes if the server signs with the keyid this build asks
+# for (a "main" signature fails the device's verification).
+KEYID=k2
+log "rotate signing key: add $KEYID, build against it"
+api POST "/api/v1/orgs/$ORG/apps/$APP_SLUG/signing-keys" '{"keyid":"'$KEYID'"}' >/dev/null
+
+log "airlift init (cert + expo.updates config, keyid $KEYID)"
+cli init --server "$SERVER" --org "$ORG" --app "$APP_SLUG" --keyid "$KEYID"
+[ "$(jq -r .expo.updates.codeSigningMetadata.keyid "$APP/app.json")" = "$KEYID" ] \
+  || die "init did not set codeSigningMetadata.keyid to $KEYID"
 
 # ───────────── native release build + install ─────────────
 (cd "$APP" && bun install --frozen-lockfile)
@@ -177,6 +191,7 @@ flow() { # flow-file KEY=VAL...
   local env_args=()
   for kv in "$@"; do env_args+=(-e "$kv"); done
   case " $* " in *" EXTRA="*) ;; *) env_args+=(-e EXTRA=none) ;; esac
+  case " $* " in *" REASON="*) ;; *) env_args+=(-e 'REASON=.*') ;; esac
   log "[$STEP] maestro $file $*"
   if [ "${E2E_DRY_RUN:-}" = 1 ]; then return 0; fi
   local out="$WORK/maestro/$STEP-${file%.yaml}.out"
@@ -225,12 +240,14 @@ device_diagnostics() {
   fi
 }
 GROUP=""
-publish() { # marker [branch] [with-extra] — sets GROUP to the new update group
-  local marker="$1" branch="${2:-$CHANNEL}" extra="${3:-}"
+publish() { # marker [branch] [flags: extra,report,crash] — sets GROUP to the new update group
+  local marker="$1" branch="${2:-$CHANNEL}" flags=",${3:-},"
   local sed_args=(-e "s/MARKER = '.*'/MARKER = '$marker'/")
-  if [ -n "$extra" ]; then sed_args+=(-e "s|EXTRA = null|EXTRA = require('./assets/extra.png')|"); fi
+  case "$flags" in *,extra,*) sed_args+=(-e "s|EXTRA = null|EXTRA = require('./assets/extra.png')|") ;; esac
+  case "$flags" in *,report,*) sed_args+=(-e "s|REPORT = null|REPORT = '$SERVER/u/$APP_ID'|") ;; esac
+  case "$flags" in *,crash,*) sed_args+=(-e "s|CRASH = false|CRASH = true|") ;; esac
   sed "${sed_args[@]}" "$WORK/marker.js.orig" >"$APP/marker.js"
-  log "publish $marker → branch $branch${extra:+ (+ new image asset)}"
+  log "publish $marker → branch $branch${3:+ ($3)}"
   cli publish --branch "$branch" --platform "$PLATFORM" --message "$marker" | tee "$WORK/publish.out"
   GROUP="$(sed -n 's/^Published update group //p' "$WORK/publish.out")"
   [ -n "$GROUP" ] || die "publish $marker: no group id in CLI output"
@@ -244,8 +261,9 @@ manifest() {
     -H "expo-channel-name: $CHANNEL" -H 'accept: multipart/mixed' \
     | tr -d '\r' | grep -m1 '"launchAsset"'
 }
-metric() { # name → sum over all label sets (0 if absent)
-  curl -fsS -b "$JAR" "$SERVER/metrics" | awk -v m="$1" '$1 == m || index($1, m "{") == 1 { s += $2 } END { print s + 0 }'
+metric() { # name [label-substring] → sum over matching label sets (0 if absent)
+  curl -fsS -b "$JAR" "$SERVER/metrics" | awk -v m="$1" -v l="${2:-}" \
+    '($1 == m || index($1, m "{") == 1) && index($1, l) { s += $2 } END { print s + 0 }'
 }
 # Generate the from→(current release) bsdiff patch ahead of time (the server
 # builds patches lazily on first request), so the device's fetch gets 226.
@@ -262,11 +280,51 @@ prewarm_patch() { # from-update-id
   done
   die "bsdiff patch $1 → $to never became ready (last HTTP $code; see airlift.log)"
 }
+# The probe error the app reported (App.js reportProbe) must arrive for the
+# right update, with a frame symbolicated back to the line that threw.
+check_symbolicated() { # marker update-id
+  local want gid="" event
+  want="$(grep -n 'e2e:probe-line' "$APP/App.js" | cut -d: -f1)"
+  log "error report for $1: expect a frame at App.js:$want"
+  for _ in $(seq 1 60); do
+    gid="$(api GET "$APP_PATH/errors?window=1h" \
+      | jq -r --arg m "airlift-e2e-probe $1" '[.groups[] | select(.message | startswith($m))][0].id // empty')"
+    [ -n "$gid" ] && break
+    sleep 1
+  done
+  [ -n "$gid" ] || die "the app's error report never reached the server"
+  event="$(api GET "$APP_PATH/errors/$gid" | jq -c '.events[0]')"
+  echo "$event" | jq '{update_id, platform, frames: [.frames[]? | {function, file, line, column, source, source_line, symbolicated}][:4]}'
+  [ "$(jq -r .update_id <<<"$event")" = "$2" ] || die "error report not attributed to update $2"
+  jq -e --argjson l "$want" \
+    'any(.frames[]?; .symbolicated and ((.source // "") | endswith("App.js")) and .source_line == $l)' \
+    <<<"$event" >/dev/null || die "no frame symbolicated to App.js:$want (raw stack: $(jq -r .raw_stack <<<"$event"))"
+}
+# Tap "check" on an update that throws while its JS loads. The device
+# downloads it, crashes, and expo-updates relaunches the previous update.
+# A dropped tap looks the same on screen (idle, old marker), so ask the
+# server whether the device actually fetched the manifest, and re-tap if not.
+crash_update() { # marker
+  local before
+  for attempt in 1 2 3; do
+    before="$(metric airlift_manifest_requests_total 'result="manifest"')"
+    flow crash.yaml
+    if [ "${E2E_DRY_RUN:-}" = 1 ] \
+      || [ "$(metric airlift_manifest_requests_total 'result="manifest"')" -gt "$before" ]; then
+      return 0
+    fi
+    log "crash update $1: the device never asked for it (attempt $attempt); tapping again"
+  done
+  die "crash update $1: the device never fetched it"
+}
 
 # ── basics: embedded → OTA → persisted → rollback → rollback-to-embedded ──
 flow launch.yaml MARKER=embedded ORIGIN=embedded
 
 publish v2
+# The rotated-key setup must check out (cert ↔ keyid ↔ server key).
+log "airlift doctor"
+cli doctor
 flow update.yaml MARKER=v2 ORIGIN=update
 flow up-to-date.yaml MARKER=v2
 flow launch.yaml MARKER=v2 ORIGIN=update
@@ -338,6 +396,26 @@ log "repoint channel $CHANNEL → branch $CHANNEL"
 api PATCH "$APP_PATH/channels/$CHANNEL" '{"branch":"'"$CHANNEL"'"}' >/dev/null
 flow update.yaml MARKER=v8 ORIGIN=update
 flow launch.yaml MARKER=v8 ORIGIN=update
+
+# ── error reporting: airlift-reporter sends a handled error with its Hermes
+#    stack; the server symbolicates it to the exact App.js line ──
+publish v10 "$CHANNEL" report
+V10_ID="$(manifest | jq -r .id)"
+flow update.yaml MARKER=v10 ORIGIN=update
+if [ "${E2E_DRY_RUN:-}" != 1 ]; then
+  check_symbolicated v10 "$V10_ID"
+fi
+
+# ── crash protection: an update that dies on launch is rolled back by the
+#    client and never offered to that device again ──
+publish v11 "$CHANNEL" crash
+crash_update v11
+flow up-to-date.yaml MARKER=v10 REASON=noUpdateAvailableOnServer
+if [ "${E2E_DRY_RUN:-}" != 1 ]; then
+  [ "$(metric airlift_manifest_requests_total 'result="blocked"')" -gt 0 ] \
+    || die "server never refused the crashed update (no blocked manifest requests)"
+fi
+flow launch.yaml MARKER=v10 ORIGIN=update
 
 log "server-side counters"
 curl -fsS -b "$JAR" "$SERVER/metrics" | grep -E '^airlift_(manifest|asset|patch)' || true

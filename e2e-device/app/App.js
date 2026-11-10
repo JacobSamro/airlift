@@ -1,13 +1,36 @@
 // Fixture app for the on-device OTA e2e. Every piece of state the Maestro
 // flows assert on is a single "key:value" Text with a testID, so the flows
 // can match exact values.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import * as Updates from 'expo-updates';
+import { captureException, initAirlift } from 'airlift-reporter';
 
-import { EXTRA, MARKER } from './marker';
+import { CRASH, EXTRA, MARKER, REPORT } from './marker';
+
+// An update published with CRASH dies while its JS loads, before anything
+// renders: expo-updates rolls back to the previous update, and the server
+// must never offer this one to the device again.
+if (CRASH) {
+  throw new Error(`airlift-e2e-crash ${MARKER}`);
+}
+
+if (REPORT) initAirlift({ url: REPORT });
+
+// Reported with its Hermes stack; the server must map the throw back to
+// this exact line of App.js through the update's sourcemap.
+function reportProbe() {
+  try {
+    throw new Error(`airlift-e2e-probe ${MARKER}`); // e2e:probe-line
+  } catch (e) {
+    captureException(e);
+  }
+}
 
 export default function App() {
+  useEffect(() => {
+    if (REPORT) reportProbe();
+  }, []);
   const [status, setStatus] = useState('idle');
   // An image only some published updates carry (never embedded): proves a
   // brand-new asset was downloaded and is loadable.

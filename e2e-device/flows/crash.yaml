@@ -1,0 +1,23 @@
+# Tap "Check for update" when the server offers an update that throws while
+# its JS loads. The app fetches it, reloads, dies before rendering, and
+# expo-updates' error recovery relaunches the previous update (back to
+# "status:idle"). run.sh checks the server saw the fetch (a dropped tap
+# looks the same on screen) and asserts the rest in later steps.
+appId: dev.airlift.e2e
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: status
+      text: "status:(idle|up-to-date.*)"
+    timeout: 60000
+- runFlow: tap-check.yaml
+# Let the fetch → crash → relaunch play out. If recovery ends in a crash
+# instead of a relaunch, the next step's launchApp starts the app again.
+- extendedWaitUntil:
+    visible:
+      id: status
+      text: "status:idle"
+    timeout: 60000
+    optional: true
