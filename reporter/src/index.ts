@@ -50,9 +50,20 @@ let scheduled = false;
 const MAX_QUEUE = 50;
 const MAX_BATCH = 20;
 
-function tryRequire(name: string): any {
+// Literal requires inside try: Metro bundles them as optional dependencies.
+// A computed `require(name)` can't be bundled at all (Metro turns it into a
+// throw), which silently dropped the update id every report needs.
+function expoUpdates(): any {
   try {
-    return require(name);
+    return require("expo-updates");
+  } catch {
+    return undefined;
+  }
+}
+
+function reactNative(): any {
+  try {
+    return require("react-native");
   } catch {
     return undefined;
   }
@@ -60,8 +71,8 @@ function tryRequire(name: string): any {
 
 /** Context from expo-updates / react-native, read lazily. */
 function context(): Partial<ErrorReport> {
-  const Updates = tryRequire("expo-updates");
-  const RN = tryRequire("react-native");
+  const Updates = expoUpdates();
+  const RN = reactNative();
   return {
     update_id: Updates?.updateId ?? undefined,
     runtime_version: Updates?.runtimeVersion ?? undefined,
