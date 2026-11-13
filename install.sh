@@ -152,7 +152,7 @@ if command -v systemctl >/dev/null 2>&1; then
   log "installing systemd service"
   curl -fsSL "$base/airlift.service" -o "$SERVICE" 2>/dev/null || cat > "$SERVICE" <<'UNIT'
 [Unit]
-Description=airlift container registry
+Description=airlift Expo OTA update server
 After=network-online.target
 Wants=network-online.target
 
