@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-13
+
+Server 0.1.1, airlift-cli 0.1.2.
+
 ### Fixed
 
 - CLI: `publish --platform all` (the default) now exports only iOS and

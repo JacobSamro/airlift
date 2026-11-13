@@ -1,6 +1,6 @@
 {
   "name": "airlift-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Publish CLI for airlift, a self-hosted Expo OTA update server",
   "license": "MIT",
   "repository": {
