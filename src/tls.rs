@@ -17,6 +17,7 @@ use axum::{
 use futures::StreamExt;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
+use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use rustls_acme::{caches::DirCache, AcmeConfig};
 use tokio::net::TcpListener;
@@ -25,14 +26,29 @@ use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use crate::db;
 use crate::state::AppState;
 
+/// How long in-flight HTTPS requests (e.g. a publish upload) get to finish
+/// after SIGTERM / Ctrl-C. Below systemd's default 90 s stop timeout, so a
+/// stuck connection can never turn a restart into a SIGKILL.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Serve the app over HTTPS with automatic certificates, plus an HTTP→HTTPS
-/// redirector. Returns only on fatal error.
+/// redirector. Returns on SIGTERM / Ctrl-C (after draining in-flight
+/// requests) or on fatal error.
 pub async fn serve(state: AppState, app: Router) -> anyhow::Result<()> {
     // rustls needs a process-wide crypto provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let http_addr = state.config().server.http_addr.clone();
     let https_addr = state.config().server.https_addr.clone();
+
+    // One shutdown future for the whole life of the server. It has to be
+    // watched in the TLS branch: once any SIGTERM handler is installed (the
+    // plain-HTTP branch installs one via axum's graceful shutdown, and that
+    // handler outlives the branch when a domain is added), the OS no longer
+    // terminates the process on SIGTERM, so an unwatched TLS loop would run
+    // until systemd's SIGKILL.
+    let shutdown = crate::server::shutdown_signal();
+    tokio::pin!(shutdown);
 
     loop {
         // Re-read each iteration: the effective public URL tracks the primary
@@ -62,14 +78,18 @@ pub async fn serve(state: AppState, app: Router) -> anyhow::Result<()> {
         // so adding a domain whose DNS/cert isn't ready can't lock the operator
         // out. Serve ACME-managed certificates on :443.
         tracing::info!(?domains, "starting ACME TLS listener");
-        let redirect = tokio::spawn(http_server(
+        let redirect = AbortOnDrop(tokio::spawn(http_server(
             http_addr.clone(),
             app.clone(),
             domains.clone(),
             public_url.clone(),
-        ));
+        )));
+        // Tracks this listener's HTTPS connections so shutdown can let them
+        // finish. Dropping it (domain reload) also asks the old connections to
+        // close once their current request is done.
+        let graceful = GracefulShutdown::new();
         tokio::select! {
-            res = run_acme(&state, &https_addr, app.clone(), domains) => {
+            res = run_acme(&state, &https_addr, app.clone(), domains, &graceful) => {
                 if let Err(e) = res {
                     tracing::error!(error = %e, "ACME listener failed; retrying in 5s");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -78,10 +98,31 @@ pub async fn serve(state: AppState, app: Router) -> anyhow::Result<()> {
             _ = state.domains_changed() => {
                 tracing::info!("domain set changed — reloading TLS");
             }
+            _ = &mut shutdown => {
+                // The accept loop is already dropped (no new connections);
+                // stop the :80 redirector and let open requests finish.
+                drop(redirect);
+                drain(graceful).await;
+                return Ok(());
+            }
         }
         // Drop the :80 redirector before the next iteration rebinds it (or falls
         // back to serving HTTP if every domain was removed).
-        redirect.abort();
+        drop(redirect);
+    }
+}
+
+/// Ask every open HTTPS connection to finish its current request and close
+/// (idle keep-alive connections close at once), waiting at most
+/// `DRAIN_TIMEOUT`.
+async fn drain(graceful: GracefulShutdown) {
+    let open = graceful.count();
+    tracing::info!(open, "draining HTTPS connections");
+    if tokio::time::timeout(DRAIN_TIMEOUT, graceful.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!(timeout = ?DRAIN_TIMEOUT, "HTTPS connections still open after the drain timeout; closing them");
     }
 }
 
@@ -91,6 +132,7 @@ async fn run_acme(
     addr: &str,
     app: Router,
     domains: Vec<String>,
+    graceful: &GracefulShutdown,
 ) -> anyhow::Result<()> {
     let tls = state.config().tls.clone();
     // Contact email is editable live in the dashboard (DB wins over config).
@@ -136,6 +178,9 @@ async fn run_acme(
         let accept = acceptor.clone();
         let app = app.clone();
         let server_config = server_config.clone();
+        // Taken before spawning (the watcher must be registered with the
+        // listener's GracefulShutdown before shutdown can be signalled).
+        let watcher = graceful.watcher();
         tokio::spawn(async move {
             // rustls-acme works over futures-io; bridge to/from tokio-io.
             match accept.accept(tcp.compat()).await {
@@ -150,10 +195,9 @@ async fn run_acme(
                             app,
                         );
                         let svc = TowerToHyperService::new(app);
-                        if let Err(e) = Builder::new(TokioExecutor::new())
-                            .serve_connection_with_upgrades(io, svc)
-                            .await
-                        {
+                        let builder = Builder::new(TokioExecutor::new());
+                        let conn = builder.serve_connection_with_upgrades(io, svc);
+                        if let Err(e) = watcher.watch(conn).await {
                             tracing::debug!("connection closed: {e}");
                         }
                     }

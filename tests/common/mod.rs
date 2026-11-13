@@ -124,6 +124,26 @@ impl Airlift {
     }
 }
 
+impl Airlift {
+    /// Send SIGTERM (what systemd sends on stop/restart) and wait up to
+    /// `timeout` for the process to exit. Returns the exit status, or `None`
+    /// if it was still running (the drop then kills it).
+    #[cfg(unix)]
+    pub async fn terminate(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let pid = self.child.id().to_string();
+        let sent = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
+        assert!(sent.success(), "kill -TERM {pid} failed");
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return Some(status);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+}
+
 impl Drop for Airlift {
     fn drop(&mut self) {
         let _ = self.child.kill();

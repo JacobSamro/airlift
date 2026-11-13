@@ -95,8 +95,13 @@ export function runExpoExport(
   if (sourceMaps) {
     args.push("--source-maps");
   }
-  if (platform !== "all") {
-    args.push("--platform", platform);
+  // Always name the platforms. With no --platform flag `expo export` builds
+  // every platform in the app config, including web for apps that have a
+  // `web` section, and a native-only module then fails the whole export.
+  // airlift only serves iOS and Android updates.
+  const platforms = platform === "all" ? ["ios", "android"] : [platform];
+  for (const p of platforms) {
+    args.push("--platform", p);
   }
   const result = spawnSync("npx", args, {
     cwd,

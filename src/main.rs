@@ -174,10 +174,18 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if tls_enabled {
-                tls::serve(state, app).await?;
+                tls::serve(state.clone(), app).await?;
             } else {
                 server::serve_http(&http_addr, app).await?;
             }
+            // Stopped by SIGTERM / Ctrl-C: write out the check-ins counted
+            // since the last rollup, which would otherwise die with the process.
+            if analytics_enabled {
+                if let Err(e) = analytics::flush_once(&state).await {
+                    tracing::warn!(error = %e, "final analytics flush failed");
+                }
+            }
+            tracing::info!("airlift stopped");
         }
     }
 
