@@ -196,10 +196,19 @@ describe("publish", () => {
   }, PUBLISH_TIMEOUT);
 
   test("refuses an identical re-publish with a clear message", async () => {
+    // Its own branch, so the main production history stays as is. Warm the
+    // Metro cache first: a cold and a cached build of the same code are not
+    // byte-identical (Expo behaviour), and this test needs two identical ones.
+    marker.dup = nextMarker();
+    await fixture.warmBuild("android");
+    const args = ["publish", "--branch", "dup", "--platform", "android"];
+    ok(await cli(args, { token: publishToken }));
+
     const before = (await inst.updates()).length;
-    const r = await cli(["publish", "--branch", "production"], { token: publishToken });
+    const r = await cli(args, { token: publishToken });
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("Duplicate update");
+    expect(r.stderr).toContain('head of branch "dup"');
     expect((await inst.updates()).length).toBe(before);
   }, PUBLISH_TIMEOUT);
 

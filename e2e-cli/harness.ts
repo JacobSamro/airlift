@@ -258,6 +258,25 @@ export class Fixture {
     fs.writeFileSync(file, src);
   }
 
+  /**
+   * Build the current code once and throw the output away, so Metro's
+   * transform cache holds it. Expo/Metro do not produce byte-identical
+   * Hermes bundles for a changed file transformed cold vs. from cache, so
+   * a test that needs two identical publishes must warm the cache first.
+   */
+  async warmBuild(platform: "android" | "ios"): Promise<void> {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), "airlift-cli-warm-"));
+    const proc = Bun.spawn(["npx", "expo", "export", "--output-dir", out, "--platform", platform], {
+      cwd: APP_DIR,
+      env: { ...process.env, CI: "1" },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    fs.rmSync(out, { recursive: true, force: true });
+    if (code !== 0) throw new Error(`warm-up expo export failed:\n${stderr}`);
+  }
+
   readText(rel: string): string {
     return fs.readFileSync(path.join(APP_DIR, rel), "utf8");
   }
