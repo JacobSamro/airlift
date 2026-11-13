@@ -49,6 +49,31 @@ jobs:
       - name: Test (unit + e2e)
         run: cargo test --release --locked
 
+  cli-e2e:
+    name: CLI e2e (every command against a real server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      # The CLI runs on node (like `npx airlift-cli`), and so does expo export.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Build web UI
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run generate
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo & target
+        uses: Swatinem/rust-cache@v2
+      - name: Build server, stub, CLI and fixture app; run the suite
+        run: e2e-cli/run.sh
+
   cli:
     name: publish CLI (typecheck & build)
     runs-on: ubuntu-latest

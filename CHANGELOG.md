@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- CLI: `publish --platform all` (the default) now exports only iOS and
+  Android. It ran `expo export` without a platform flag, which also built
+  web for apps whose Expo config lists it, and a native-only module then
+  failed the whole publish.
+- Server: SIGTERM / Ctrl-C now stops the server when automatic TLS is
+  serving a domain. If the server had started before a domain was added,
+  SIGTERM was swallowed and `systemctl restart` waited for systemd's
+  SIGKILL (90 s). Shutdown now stops accepting, lets in-flight HTTPS
+  requests finish (up to 20 s), and writes out pending check-in counts.
+
+### Tests
+
+- `e2e-cli/`: every CLI command end to end against a real server and a real
+  Expo project (`e2e-cli/run.sh`, CI job `cli-e2e`).
+- `tests/shutdown.rs`: SIGTERM after a domain is added at runtime.
+
 ## [0.1.0] - 2026-11-10
 
 First release.

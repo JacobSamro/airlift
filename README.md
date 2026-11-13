@@ -179,6 +179,17 @@ it like a device: it parses multipart manifests, verifies the RSA signatures
 against the served certificate, and exercises publish/promote/rollback/
 directive flows.
 
+```sh
+e2e-cli/run.sh                              # CLI e2e (~1 min after builds)
+```
+
+The CLI suite runs every `airlift-cli` command (init, publish, list, promote,
+rollback, rollout, split, republish, doctor, generate-certs, flag overrides,
+token and connection errors) against a real `airlift serve` and a real Expo
+project (`e2e-device/app`, so `publish` runs a real `expo export`). Each step
+checks the CLI output, the server state, and what an expo-updates client is
+served: signature, bundle hash, and which publish the bundle came from.
+
 ## Disclaimer
 
 airlift is **not officially supported or affiliated with [Expo](https://expo.dev/)**.
